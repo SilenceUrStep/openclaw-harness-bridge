@@ -16,6 +16,12 @@
       "modelsPointer": "$.provider.*.models",
       "fieldMap": { "contextWindow": "context", "maxTokens": "maxTokensOutput" },
       "defaultModelPointer": "$.model"
+    },
+    "mount": {
+      "configPath": "~/.config/opencode/opencode.json",
+      "format": "opencode-json",
+      "externalDirectoryPointer": "$.permission.external_directory",
+      "instructionsPointer": "$.instructions"
     }
   },
   "session": { "idPattern": "ses_[a-zA-Z0-9]+" }
