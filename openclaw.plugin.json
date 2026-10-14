@@ -36,7 +36,8 @@
       "harness_list",
       "harness_sync_models",
       "harness_run",
-      "harness_status"
+      "harness_status",
+      "harness_mount"
     ]
   }
 }
