@@ -35,5 +35,21 @@
     "extensions": [
       "./dist/index.js"
     ]
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SilenceUrStep/openclaw-harness-bridge.git"
+  },
+  "homepage": "https://github.com/SilenceUrStep/openclaw-harness-bridge#readme",
+  "bugs": "https://github.com/SilenceUrStep/openclaw-harness-bridge/issues",
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "harness",
+    "opencode",
+    "claude-code",
+    "codex",
+    "orchestration",
+    "coding-agent"
+  ]
 }
