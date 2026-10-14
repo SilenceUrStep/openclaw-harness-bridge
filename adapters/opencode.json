@@ -1,0 +1,22 @@
+{
+  "id": "opencode",
+  "displayName": "OpenCode",
+  "description": "OpenCode CLI（生产环境验证的内置 adapter）",
+  "binary": "opencode",
+  "versionCheck": ["opencode", "--version"],
+  "delegate": {
+    "run": ["opencode", "run", "{prompt}"],
+    "resume": ["opencode", "run", "-s", "{sessionId}", "{prompt}"],
+    "timeoutMs": 600000
+  },
+  "config": {
+    "modelConfig": {
+      "path": "~/.config/opencode/opencode.json",
+      "format": "opencode-json",
+      "modelsPointer": "$.provider.*.models",
+      "fieldMap": { "contextWindow": "context", "maxTokens": "maxTokensOutput" },
+      "defaultModelPointer": "$.model"
+    }
+  },
+  "session": { "idPattern": "ses_[a-zA-Z0-9]+" }
+}
