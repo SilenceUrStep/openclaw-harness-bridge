@@ -1,0 +1,12 @@
+{
+  "id": "echo",
+  "displayName": "Echo (example)",
+  "description": "最小示例 adapter：回显 prompt，用于联调插件链路，不调用真实模型",
+  "binary": "echo",
+  "versionCheck": ["echo", "ok"],
+  "delegate": {
+    "run": ["echo", "{prompt}"],
+    "timeoutMs": 30000
+  },
+  "session": { "idPattern": "ses_[a-zA-Z0-9]+" }
+}

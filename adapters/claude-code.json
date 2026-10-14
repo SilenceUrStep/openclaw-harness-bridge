@@ -1,0 +1,13 @@
+{
+  "id": "claude-code",
+  "displayName": "Claude Code",
+  "description": "Anthropic Claude Code CLI（社区贡献 stub，未经生产验证）",
+  "binary": "claude",
+  "versionCheck": ["claude", "--version"],
+  "delegate": {
+    "run": ["claude", "-p", "{prompt}"],
+    "resume": ["claude", "-p", "--resume", "{sessionId}", "{prompt}"],
+    "timeoutMs": 600000
+  },
+  "session": { "idPattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" }
+}

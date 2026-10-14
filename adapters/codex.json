@@ -1,0 +1,12 @@
+{
+  "id": "codex",
+  "displayName": "Codex CLI",
+  "description": "OpenAI Codex CLI（社区贡献 stub，未经生产验证）",
+  "binary": "codex",
+  "versionCheck": ["codex", "--version"],
+  "delegate": {
+    "run": ["codex", "exec", "{prompt}"],
+    "timeoutMs": 600000
+  },
+  "session": {}
+}

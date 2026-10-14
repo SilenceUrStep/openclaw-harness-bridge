@@ -1,0 +1,38 @@
+{
+  "_comment": "模型参数字典。exact=已校准最优值(2026-09-20)；prefix=同家族估算(带needsReview)；default=保守兜底。新模型家族上线时按官方文档补 exact 条目，禁止瞎猜。",
+  "defaults": {
+    "contextWindow": 200000,
+    "maxTokens": 32000,
+    "reasoning": false
+  },
+  "exact": {
+    "glm-5.3":         { "name": "GLM-5.3",         "contextWindow": 1000000, "maxTokens": 128000, "reasoning": true },
+    "glm-5.3-flash":   { "name": "GLM-5.3-Flash",   "contextWindow": 1000000, "maxTokens": 128000, "reasoning": true },
+    "glm-5.3-flashx":  { "name": "GLM-5.3-FlashX",  "contextWindow": 1000000, "maxTokens": 128000, "reasoning": true },
+    "glm-5.2":         { "name": "GLM-5.2",         "contextWindow": 1000000, "maxTokens": 128000, "reasoning": true },
+    "glm-5.1":         { "name": "GLM-5.1",         "contextWindow": 200000,  "maxTokens": 128000, "reasoning": true },
+    "glm-5-turbo":     { "name": "GLM-5-Turbo",     "contextWindow": 200000,  "maxTokens": 128000, "reasoning": true },
+    "glm-5":           { "name": "GLM-5",           "contextWindow": 200000,  "maxTokens": 128000, "reasoning": true },
+    "glm-4.7":         { "name": "GLM-4.7",         "contextWindow": 200000,  "maxTokens": 128000, "reasoning": true },
+    "glm-4.6":         { "name": "GLM-4.6",         "contextWindow": 200000,  "maxTokens": 128000, "reasoning": true },
+    "glm-4.5":         { "name": "GLM-4.5",         "contextWindow": 200000,  "maxTokens": 128000, "reasoning": true },
+    "glm-4.5-air":     { "name": "GLM-4.5-Air",     "contextWindow": 128000,  "maxTokens": 96000,  "reasoning": true },
+    "glm-5v-turbo":    { "name": "GLM-5V-Turbo",    "contextWindow": 200000,  "maxTokens": 128000, "reasoning": true },
+    "deepseek-v4-pro":   { "name": "DeepSeek-V4-Pro",   "contextWindow": 1000000, "maxTokens": 131072, "reasoning": true },
+    "deepseek-v4-flash": { "name": "DeepSeek-V4-Flash", "contextWindow": 1000000, "maxTokens": 16384,  "reasoning": true },
+    "tc-code-latest":    { "name": "TC-Code-Latest",    "contextWindow": 196608,  "maxTokens": 32768,  "reasoning": false }
+  },
+  "prefix": [
+    { "match": "glm-",     "contextWindow": 200000,  "maxTokens": 128000, "reasoning": true },
+    { "match": "deepseek", "contextWindow": 1000000, "maxTokens": 65536,  "reasoning": true },
+    { "match": "kimi",     "contextWindow": 256000,  "maxTokens": 32768,  "reasoning": true },
+    { "match": "minimax",  "contextWindow": 1000000, "maxTokens": 32768,  "reasoning": true },
+    { "match": "qwen",     "contextWindow": 200000,  "maxTokens": 32768,  "reasoning": true },
+    { "match": "mimo",     "contextWindow": 200000,  "maxTokens": 32768,  "reasoning": true }
+  ],
+  "skip_patterns": [
+    "audio", "tts", "asr", "realtime", "speech",
+    "image", "wan2", "cogview", "cogvideo", "vidu", "t2v", "i2v",
+    "embedding", "rerank", "ocr"
+  ]
+}
