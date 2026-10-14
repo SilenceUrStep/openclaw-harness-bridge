@@ -15,7 +15,7 @@ OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CL
 - 官方解决「OpenClaw 会话跑在 harness 上」（对话级）
 - 本插件解决「OpenClaw 助手指挥 harness 干活」（任务级）
 
-## 工具（MVP v0.1）
+## 工具
 
 | 工具 | 作用 |
 |------|------|
@@ -23,6 +23,7 @@ OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CL
 | `harness_sync_models` | 按统一参数字典校准各 harness 模型配置（报告 / 字段级 merge 写回 / 切默认模型） |
 | `harness_run` | 委派任务（默认后台执行 + 台账；`wait=true` 同步等待） |
 | `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部） |
+| `harness_mount` | 把共享知识库目录挂载进 harness（external_directory 放行 + instructions 注入；dry-run/apply，幂等） |
 
 ## 声明式 Adapter
 
@@ -48,11 +49,21 @@ OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CL
       "modelsPointer": "$.provider.*.models",
       "fieldMap": { "contextWindow": "context", "maxTokens": "maxTokensOutput" },
       "defaultModelPointer": "$.model"
+    },
+    "mount": {
+      "configPath": "~/.config/opencode/opencode.json",
+      "format": "opencode-json",
+      "externalDirectoryPointer": "$.permission.external_directory",
+      "instructionsPointer": "$.instructions"
     }
   },
   "session": { "idPattern": "ses_[a-zA-Z0-9]+" }
 }
 ```
+
+`mount` 块声明知识目录挂载机制：`harness_mount` 按它把知识库目录写进 harness 配置
+（`external_directory` 放行 + 可选 `instructions` 注入入口文件），dry-run 默认，`apply=true` 写回，
+复用字段级 merge + 时间戳备份 + 写后验证，重复挂载自动跳过（幂等）。
 
 ## 配置（openclaw.json → plugins.entries["harness-bridge"].config）
 

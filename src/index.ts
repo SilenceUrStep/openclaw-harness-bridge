@@ -15,6 +15,7 @@ import { Ledger, type TaskRecord } from "./lib/ledger.js";
 import { runTask } from "./lib/runner.js";
 import { loadParamDict } from "./lib/params.js";
 import { switchDefaultModel, syncAdapterModels } from "./lib/sync.js";
+import { mountAdapterKnowledge } from "./lib/mount.js";
 
 const configSchema = Type.Object({
   dataDir: Type.Optional(
@@ -183,6 +184,36 @@ export default defineToolPlugin({
           logFile: rec.logFile ?? null,
           hint: "后台执行中，用 harness_status 查询进度与结果",
         };
+      },
+    }),
+
+    tool({
+      name: "harness_mount",
+      label: "Harness Mount",
+      description:
+        "把共享知识库目录挂载进指定 harness 的配置：external_directory 目录放行 + instructions 注入入口文件。默认只出报告；apply=true 字段级写回（自动备份 + 写后验证），已挂载内容自动跳过（幂等）。",
+      parameters: Type.Object({
+        harness: Type.String({ description: "adapter id，见 harness_list" }),
+        path: Type.String({ description: "知识库目录绝对路径" }),
+        inject: Type.Optional(
+          Type.String({ description: "注入 instructions 的入口文件名，如 README.md" }),
+        ),
+        apply: Type.Optional(Type.Boolean({ description: "写回配置，默认 false（只出报告）" })),
+      }),
+      execute: async (params, config) => {
+        const cfg = config as BridgeConfig;
+        const adapter = getAdapter(cfg, params.harness);
+        if (!adapter) {
+          const known = listAdapters(cfg)
+            .map((a) => a.id)
+            .join(", ");
+          return { error: `未知 harness: ${params.harness}（可用: ${known}）` };
+        }
+        return mountAdapterKnowledge(adapter, {
+          path: params.path,
+          inject: params.inject,
+          apply: params.apply === true,
+        });
       },
     }),
 

@@ -29,6 +29,17 @@ export interface AdapterModelConfig {
   defaultModelPointer?: string;
 }
 
+export interface AdapterMountConfig {
+  /** harness 配置文件路径（支持 ~） */
+  configPath: string;
+  /** 配置格式；MVP 仅支持 "opencode-json" */
+  format: string;
+  /** 目录放行 map 的 JSON Pointer，如 "$.permission.external_directory" */
+  externalDirectoryPointer?: string;
+  /** instructions 数组的 JSON Pointer，如 "$.instructions" */
+  instructionsPointer?: string;
+}
+
 export interface Adapter {
   id: string;
   displayName: string;
@@ -36,7 +47,7 @@ export interface Adapter {
   binary: string;
   versionCheck?: string[];
   delegate: AdapterDelegate;
-  config?: { modelConfig?: AdapterModelConfig };
+  config?: { modelConfig?: AdapterModelConfig; mount?: AdapterMountConfig };
   session?: { idPattern?: string };
 }
 

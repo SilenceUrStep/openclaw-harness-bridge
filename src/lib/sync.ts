@@ -46,7 +46,7 @@ const DEFAULT_FIELD_MAP: Record<string, string> = {
   reasoning: "reasoning",
 };
 
-function backupAndWrite(file: string, json: unknown): string {
+export function backupAndWrite(file: string, json: unknown): string {
   const ts = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
   const backup = `${file}.bak.hb-${ts}`;
   copyFileSync(file, backup);
