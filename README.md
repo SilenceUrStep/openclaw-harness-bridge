@@ -4,32 +4,30 @@ Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Clau
 
 > **Status**: MVP v0.2 running in production · RFC under community review — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
 >
-> 设计背景与社区讨论稿见 [docs/RFC.md](docs/RFC.md)
+> Design background and the community discussion draft: [docs/RFC.md](docs/RFC.md) · [中文文档](README.zh-CN.md)
 
-## 定位
+## Positioning
 
-OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CLI backend / Tool plugin）。
-本插件是官方尚未覆盖的**任务级编排层**：AI 助手作为多 harness 的控制平面——
-查状态、同步模型配置、委派任务、跟踪进度、沉淀台账。
+OpenClaw already ships three layers for integrating external agents (Agent Harness SDK / CLI backend / Tool plugin). This plugin covers the **task-level orchestration layer** they don't: your AI assistant becomes the control plane for multiple harnesses — check status, sync model configs, delegate tasks, track progress, and keep a durable ledger.
 
-- 官方解决「OpenClaw 会话跑在 harness 上」（对话级）
-- 本插件解决「OpenClaw 助手指挥 harness 干活」（任务级）
+- Official layers solve "OpenClaw sessions running ON a harness" (conversation-level)
+- This plugin solves "the assistant directing harnesses to do work" (task-level)
 
-## 工具
+## Tools
 
-| 工具 | 作用 |
-|------|------|
-| `harness_list` | 列出已注册 harness 及健康状态（二进制/版本/配置文件存在性） |
-| `harness_sync_models` | 按统一参数字典校准各 harness 模型配置（报告 / 字段级 merge 写回 / 切默认模型） |
-| `harness_run` | 委派任务（默认后台执行 + 台账；`wait=true` 同步等待） |
-| `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部） |
-| `harness_mount` | 把共享知识库目录挂载进 harness（external_directory 放行 + instructions 注入；dry-run/apply，幂等） |
+| Tool | Purpose |
+|------|---------|
+| `harness_list` | List registered harnesses and their health (binary / version / config-file presence) |
+| `harness_sync_models` | Calibrate each harness's model config against a shared parameter dictionary (report / field-level merge write-back / default-model switch) |
+| `harness_run` | Delegate a task (background + ledger by default; `wait=true` for synchronous runs) |
+| `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail) |
+| `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
 
-## 声明式 Adapter
+## Declarative adapters
 
-内置：`opencode`（生产验证）/ `claude-code`、`codex`（社区 stub）/ `echo`（联调示例）。
+Built-in: `opencode` (production-verified) / `claude-code`, `codex` (community stubs) / `echo` (smoke-test example).
 
-接入新 harness 只需一个 JSON 文件——放到插件数据目录 `adapters/` 即可覆盖内置同名文件，**不改插件代码**：
+Adding a new harness takes one JSON file — drop it into the plugin data directory `adapters/` to override a built-in of the same name, **no plugin code changes**:
 
 ```json
 {
@@ -61,40 +59,38 @@ OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CL
 }
 ```
 
-`mount` 块声明知识目录挂载机制：`harness_mount` 按它把知识库目录写进 harness 配置
-（`external_directory` 放行 + 可选 `instructions` 注入入口文件），dry-run 默认，`apply=true` 写回，
-复用字段级 merge + 时间戳备份 + 写后验证，重复挂载自动跳过（幂等）。
+The `mount` block declares the knowledge-directory mounting mechanism: `harness_mount` uses it to write a knowledge directory into the harness config (`external_directory` allow + optional `instructions` entry-file injection). Dry-run by default, `apply=true` to write back — reusing field-level merge + timestamped backup + post-write validation. Repeated mounts are skipped (idempotent).
 
-## 配置（openclaw.json → plugins.entries["harness-bridge"].config）
+## Configuration (openclaw.json → plugins.entries["harness-bridge"].config)
 
-| 键 | 默认 | 说明 |
-|----|------|------|
-| `dataDir` | `~/.openclaw/harness-bridge` | 台账 / 任务日志 / 用户 adapter |
-| `adaptersDir` | `<dataDir>/adapters` | 额外 adapter 目录（覆盖内置同名文件） |
-| `paramsFile` | 内置字典 | 模型参数字典（exact/prefix/defaults 三级匹配 + skip_patterns） |
-| `notifyCommand` | 无 | 后台任务完成时执行的 shell 命令（env: `HB_TASK_ID`/`HB_HARNESS`/`HB_STATUS`/`HB_EXIT_CODE`/`HB_SESSION_ID`/`HB_LOG_FILE`） |
-| `defaultTimeoutMs` | 600000 | `harness_run` 默认超时 |
+| Key | Default | Description |
+|-----|---------|-------------|
+| `dataDir` | `~/.openclaw/harness-bridge` | Ledger / task logs / user adapters |
+| `adaptersDir` | `<dataDir>/adapters` | Extra adapter directory (overrides built-ins by filename) |
+| `paramsFile` | built-in dictionary | Model parameter dictionary (exact / prefix / defaults 3-tier matching + skip_patterns) |
+| `notifyCommand` | none | Shell command executed when a background task finishes (env: `HB_TASK_ID` / `HB_HARNESS` / `HB_STATUS` / `HB_EXIT_CODE` / `HB_SESSION_ID` / `HB_LOG_FILE`) |
+| `defaultTimeoutMs` | 600000 | Default timeout for `harness_run` |
 
-## 台账与日志
+## Ledger and logs
 
-- 台账：`<dataDir>/ledger.jsonl`，追加式 JSONL，同一任务多条记录按 id 取最新（崩溃安全）
-- 任务日志：`<dataDir>/tasks/<taskId>.log`（stdout+stderr 全量）
-- `harness_status` 发现 running 任务进程已消失且无退出记录时，自动标记 `lost`
+- Ledger: `<dataDir>/ledger.jsonl`, append-only JSONL; multiple records for the same task resolve to the latest by id (crash-safe)
+- Task logs: `<dataDir>/tasks/<taskId>.log` (full stdout + stderr)
+- When `harness_status` finds a running task whose process is gone with no exit record, it marks the task `lost`
 
-## 写回纪律（sync_models apply=true）
+## Write-back discipline (sync_models apply=true)
 
-字段级 merge（只写字典提供的键，不碰用户手工调优的其他字段）+ 时间戳备份（`*.bak.hb-<ts>`）+ 写后验证（tmp 文件可完整解析才原子替换）。
+Field-level merge (only writes dictionary-provided keys, never touches your hand-tuned fields) + timestamped backup (`*.bak.hb-<ts>`) + post-write validation (the tmp file must parse fully before the atomic replace).
 
-## 开发
+## Development
 
 ```bash
 npm install
-npm run plugin:build     # tsc + 生成 manifest 元数据
+npm run plugin:build     # tsc + generate manifest metadata
 npm run plugin:validate
 npm test
 ```
 
-本地安装到网关：
+Install into your gateway locally:
 
 ```bash
 openclaw plugins install /path/to/this/plugin
