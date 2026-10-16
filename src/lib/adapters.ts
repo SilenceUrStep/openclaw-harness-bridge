@@ -45,6 +45,21 @@ export interface AdapterMountConfig {
   instructionsPointer?: string;
 }
 
+/** dsh-patch 模型同步配置（patchFile 相对 dataDir；DSH_HOME = <dataDir>/dsh-home） */
+export interface DshModelSyncConfig {
+  format: "dsh-patch";
+  patchFile: string;
+  gateway: {
+    providerId: string;
+    displayName: string;
+    api: string;
+    baseURL: string;
+    apiKeyEnv: string;
+  };
+  models: string[];
+  defaultModel?: { provider: string; model: string };
+}
+
 export interface Adapter {
   id: string;
   displayName: string;
@@ -61,6 +76,8 @@ export interface Adapter {
     reasoningEffort?: string;
     maxTokens?: number;
   };
+  /** dsh 模型配置同步（dsh-patch 格式，与 opencode 的 config.modelConfig 互斥使用） */
+  modelSync?: DshModelSyncConfig;
   versionCheck?: string[];
   delegate: AdapterDelegate;
   config?: { modelConfig?: AdapterModelConfig; mount?: AdapterMountConfig };
