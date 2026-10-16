@@ -27,7 +27,7 @@ import {
   type StdioRpcTransport,
 } from "./lib/transport.js";
 import { loadParamDict } from "./lib/params.js";
-import { switchDefaultModel, syncAdapterModels } from "./lib/sync.js";
+import { switchDefaultModel, syncAdapterModels, syncDshPatch, switchDshDefaultModel } from "./lib/sync.js";
 import { mountAdapterKnowledge } from "./lib/mount.js";
 
 const configSchema = Type.Object({
@@ -196,13 +196,19 @@ export default defineToolPlugin({
         const cfg = config as BridgeConfig;
         const dict = loadParamDict(paramDictFile(cfg));
         const apply = params.apply === true;
-        let adapters = listAdapters(cfg).filter((a) => a.config?.modelConfig);
+        let adapters = listAdapters(cfg).filter(
+          (a) => a.config?.modelConfig || a.modelSync?.format === "dsh-patch",
+        );
         if (params.harness) adapters = adapters.filter((a) => a.id === params.harness);
         if (adapters.length === 0) {
-          return { error: "没有匹配的 adapter（或所选 adapter 未配置 modelConfig）" };
+          return { error: "没有匹配的 adapter（或所选 adapter 未配置 modelConfig/modelSync）" };
         }
+        const dataDir = resolveDataDir(cfg);
         const reports = adapters.map((a) => {
-          const r = syncAdapterModels(a, dict, apply);
+          const r =
+            a.modelSync?.format === "dsh-patch"
+              ? syncDshPatch(a, dict, apply, dataDir)
+              : syncAdapterModels(a, dict, apply);
           if (r.changes.length > MAX_CHANGES) {
             return {
               ...r,
@@ -214,7 +220,11 @@ export default defineToolPlugin({
           return r;
         });
         const defaultSwitches = params.setDefaultModel
-          ? adapters.map((a) => switchDefaultModel(a, params.setDefaultModel as string, apply))
+          ? adapters.map((a) =>
+              a.modelSync?.format === "dsh-patch"
+                ? switchDshDefaultModel(a, params.setDefaultModel as string, apply, dataDir)
+                : switchDefaultModel(a, params.setDefaultModel as string, apply),
+            )
           : [];
         return { apply, reports, defaultSwitches };
       },
