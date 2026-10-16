@@ -4,9 +4,9 @@
 
 从 OpenClaw 助手注册、配置、委派并监控多个编码 agent harness（OpenCode、Claude Code、Codex CLI 等）。
 
-> **状态**：MVP v0.2 生产运行中 · RFC 社区评审中 — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
+> **状态**：v0.3.2 生产运行中 · RFC 社区评审中 — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
 >
-> 设计背景与社区讨论稿见 [docs/RFC.md](docs/RFC.md)
+> 设计背景与社区讨论稿见 [docs/RFC.md](docs/RFC.md)（v0.1）· [docs/RFC-v0.3.md](docs/RFC-v0.3.md)（v0.3：SDK 级管理）
 
 ## 定位
 
@@ -26,6 +26,14 @@ OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CL
 | `harness_run` | 委派任务（默认后台执行 + 台账；`wait=true` 同步等待） |
 | `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部） |
 | `harness_mount` | 把共享知识库目录挂载进 harness（external_directory 放行 + instructions 注入；dry-run/apply，幂等） |
+
+## v0.3 新特性
+
+- **Transport 抽象** — adapter 可声明 `cli` / `http` / `stdio-rpc` 三种 transport（schema v2；无 transport 字段 = cli，完全向后兼容）。HTTP 探活失败自动回落 cli（台账记 `fallback_used=1`）。
+- **OpenCode HTTP runner** — 直连长驻 `opencode serve`：`POST /session` → `prompt_async` → SSE 事件流 → idle 结算。Last-Event-ID 断点续传 + 指数退避，事件级台账，成本/token 核算，fork 端点支持幂等重试。
+- **事件级 SQLite 台账** — `task` + `task_event` 双表（WAL、`busy_timeout`），旧库自动补列迁移；旧 JSONL 台账只读保留。`harness_status --events <taskId>` 输出完整事件时间线，含成本汇总。
+- **dsh adapter** — DeepSeek Harness 走 stdio JSON-RPC：常驻进程多会话复用、隔离 `DSH_HOME`、对真实二进制做版本协商（`dsh --version`；握手返回的 wire 版本仅记录不参与门禁）、headless NDJSON 兑底。
+- **fork-before-retry** — `harness_run retryOf=<taskId>` 先 fork 失败任务的会话再续跑，重试不污染原会话。
 
 ## 声明式 Adapter
 
@@ -79,7 +87,7 @@ OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CL
 
 ## 台账与日志
 
-- 台账：`<dataDir>/ledger.jsonl`，追加式 JSONL，同一任务多条记录按 id 取最新（崩溃安全）
+- 台账：`<dataDir>/ledger.db` — SQLite（WAL），`task` + `task_event` 双表；事件级明细（step / tool_use / text / error / status / retry / permission），payload 字段级 2KB 截断；旧 JSONL 台账自动迁移并只读保留（`harness_status legacy=true` 仍可读）
 - 任务日志：`<dataDir>/tasks/<taskId>.log`（stdout+stderr 全量）
 - `harness_status` 发现 running 任务进程已消失且无退出记录时，自动标记 `lost`
 
