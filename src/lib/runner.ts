@@ -80,10 +80,10 @@ function finalize(
   };
 }
 
-function notify(opts: RunOptions, rec: TaskRecord): void {
-  if (!opts.notifyCommand) return;
+export function notify(notifyCommand: string | undefined, rec: TaskRecord): void {
+  if (!notifyCommand) return;
   try {
-    spawnSync("bash", ["-c", opts.notifyCommand], {
+    spawnSync("bash", ["-c", notifyCommand], {
       timeout: 15000,
       encoding: "utf8",
       env: {
@@ -177,7 +177,7 @@ export function runTask(opts: RunOptions): TaskRecord {
     clearTimeout(timer);
     const rec = finalize(withPid, "failed", null, null, startedMs, null, logFile, err.message);
     opts.ledger.append(rec);
-    notify(opts, rec);
+    notify(opts.notifyCommand, rec);
   });
 
   child.on("exit", (code, signal) => {
@@ -194,7 +194,7 @@ export function runTask(opts: RunOptions): TaskRecord {
       logFile,
     );
     opts.ledger.append(rec);
-    notify(opts, rec);
+    notify(opts.notifyCommand, rec);
   });
 
   return withPid;

@@ -12,6 +12,11 @@ export interface AdapterDelegate {
   run: string[];
   /** 续接会话的 argv 模板，支持 {sessionId}/{prompt} 占位（可选） */
   resume?: string[];
+  /**
+   * fork-before-retry（可选）：http 型为端点配置（如 {path:"/session/{sessionId}/fork"}）；
+   * cli 型为 argv 模板，输出需含新会话 ID（按 session.idPattern 提取）
+   */
+  fork?: string | string[] | { path?: string };
   /** 默认超时毫秒 */
   timeoutMs?: number;
 }
@@ -45,6 +50,17 @@ export interface Adapter {
   displayName: string;
   description?: string;
   binary: string;
+  /** adapter schema 版本；v1 文件无此字段 = 缺省 1（无 transport 字段即 cli 模式） */
+  schemaVersion?: number;
+  /** 版本门禁（http / stdio-rpc transport 通用）：越界显性拒绝执行 */
+  versionGate?: { min?: string; max?: string };
+  /** dsh SDK 握手参数（initialize 的 provider/model；env DSH_PROVIDER/DSH_MODEL 可覆盖） */
+  sdk?: {
+    provider?: string;
+    model?: string;
+    reasoningEffort?: string;
+    maxTokens?: number;
+  };
   versionCheck?: string[];
   delegate: AdapterDelegate;
   config?: { modelConfig?: AdapterModelConfig; mount?: AdapterMountConfig };
