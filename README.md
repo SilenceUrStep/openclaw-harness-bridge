@@ -2,9 +2,9 @@
 
 Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, …) from your OpenClaw assistant.
 
-> **Status**: MVP v0.2 running in production · RFC under community review — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
+> **Status**: v0.3.2 running in production · RFC under community review — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
 >
-> Design background and the community discussion draft: [docs/RFC.md](docs/RFC.md) · [中文文档](README.zh-CN.md)
+> Design background and the community discussion draft: [docs/RFC.md](docs/RFC.md) (v0.1) · [docs/RFC-v0.3.md](docs/RFC-v0.3.md) (v0.3: SDK-level management) · [中文文档](README.zh-CN.md)
 
 ## Positioning
 
@@ -22,6 +22,14 @@ OpenClaw already ships three layers for integrating external agents (Agent Harne
 | `harness_run` | Delegate a task (background + ledger by default; `wait=true` for synchronous runs) |
 | `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail) |
 | `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
+
+## What's new in v0.3
+
+- **Transport abstraction** — adapters declare `cli`, `http`, or `stdio-rpc` transports (schema v2; no `transport` field = `cli`, fully backward compatible). HTTP health-probe failure auto-falls back to `cli` (`fallback_used=1` in the ledger).
+- **OpenCode HTTP runner** — talks to a long-running `opencode serve` directly: `POST /session` → `prompt_async` → SSE event stream → idle settlement. Last-Event-ID resume with exponential backoff, per-event ledger entries, cost/token accounting, fork endpoint for idempotent retries.
+- **Event-level SQLite ledger** — `task` + `task_event` tables (WAL, `busy_timeout`), automatic column migration for older databases; the legacy JSONL ledger is kept read-only. `harness_status --events <taskId>` prints a full event timeline; cost summary included.
+- **dsh adapter** — DeepSeek Harness over stdio JSON-RPC: one resident process multiplexes sessions, isolated `DSH_HOME`, version negotiation against the real binary (`dsh --version`; the handshake's wire-stable version is recorded but not gated), headless NDJSON fallback.
+- **fork-before-retry** — `harness_run retryOf=<taskId>` forks the failed task's session first, so retries never pollute the original session.
 
 ## Declarative adapters
 
@@ -73,7 +81,7 @@ The `mount` block declares the knowledge-directory mounting mechanism: `harness_
 
 ## Ledger and logs
 
-- Ledger: `<dataDir>/ledger.jsonl`, append-only JSONL; multiple records for the same task resolve to the latest by id (crash-safe)
+- Ledger: `<dataDir>/ledger.db` — SQLite (WAL) with `task` + `task_event` tables; event-level detail (step / tool_use / text / error / status / retry / permission) with per-field 2KB payload truncation; older JSONL ledgers migrate automatically and are kept read-only (`harness_status legacy=true` still reads them)
 - Task logs: `<dataDir>/tasks/<taskId>.log` (full stdout + stderr)
 - When `harness_status` finds a running task whose process is gone with no exit record, it marks the task `lost`
 
