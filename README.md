@@ -2,7 +2,7 @@
 
 Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, …) from your OpenClaw assistant.
 
-> **Status**: v0.3.2 running in production · RFC under community review — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
+> **Status**: v0.4.0 running in production · RFC under community review — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
 >
 > Design background and the community discussion draft: [docs/RFC.md](docs/RFC.md) (v0.1) · [docs/RFC-v0.3.md](docs/RFC-v0.3.md) (v0.3: SDK-level management) · [中文文档](README.zh-CN.md)
 
@@ -13,6 +13,48 @@ OpenClaw already ships three layers for integrating external agents (Agent Harne
 - Official layers solve "OpenClaw sessions running ON a harness" (conversation-level)
 - This plugin solves "the assistant directing harnesses to do work" (task-level)
 
+## Installation
+
+From ClawHub:
+
+```bash
+openclaw plugins install clawhub:openclaw-plugin-harness-bridge
+```
+
+Or from a local checkout:
+
+```bash
+openclaw plugins install /path/to/openclaw-plugin-harness-bridge
+```
+
+Then restart the gateway and verify:
+
+```bash
+openclaw gateway restart
+openclaw plugins inspect harness-bridge --runtime
+```
+
+## Quick start
+
+**Out of the box (zero config):**
+
+- Data directory `~/.openclaw/harness-bridge` is created automatically (SQLite ledger + task logs)
+- All five tools are available immediately — run `harness_list` to see every adapter's health
+- The v0.4 status line is on by default: every outbound reply gets a `后台任务：…` (background tasks) line built from the ledger
+
+**Optional setup (openclaw.json → plugins.entries["harness-bridge"].config):**
+
+- `taskboardFile` — merge a markdown taskboard's "in progress" section into the status line
+- `notifyCommand` — run a shell command when a background task finishes (webhook / push notification)
+- Adapter credentials — e.g. the OpenCode HTTP transport reads `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` from the gateway environment
+
+**First delegation:**
+
+```
+harness_run { "harness": "opencode", "prompt": "..." }   // background + ledger by default
+harness_status { }                                        // poll progress / results
+```
+
 ## Tools
 
 | Tool | Purpose |
@@ -22,6 +64,11 @@ OpenClaw already ships three layers for integrating external agents (Agent Harne
 | `harness_run` | Delegate a task (background + ledger by default; `wait=true` for synchronous runs) |
 | `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail) |
 | `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
+
+## What's new in v0.4
+
+- **Session-transparency status line** — a `message_sending` hook appends a `后台任务：…` (background tasks) line to every outbound reply. Sources: running tasks from the SQLite ledger (with pid liveness check, dead processes dropped) plus an optional markdown taskboard section. Hand-written status lines are respected (no duplication), `MEDIA:` directives stay on their own line, `NO_REPLY` / empty messages are skipped, and the hook is fail-open — a status-line failure never blocks message delivery.
+- New config keys: `statusLineEnabled` (default on) and `taskboardFile`.
 
 ## What's new in v0.3
 
@@ -78,6 +125,8 @@ The `mount` block declares the knowledge-directory mounting mechanism: `harness_
 | `paramsFile` | built-in dictionary | Model parameter dictionary (exact / prefix / defaults 3-tier matching + skip_patterns) |
 | `notifyCommand` | none | Shell command executed when a background task finishes (env: `HB_TASK_ID` / `HB_HARNESS` / `HB_STATUS` / `HB_EXIT_CODE` / `HB_SESSION_ID` / `HB_LOG_FILE`) |
 | `defaultTimeoutMs` | 600000 | Default timeout for `harness_run` |
+| `statusLineEnabled` | `true` | v0.4 — append a background-tasks status line to every outbound reply |
+| `taskboardFile` | none | v0.4 — markdown taskboard whose "in progress" section feeds the status line |
 
 ## Ledger and logs
 
