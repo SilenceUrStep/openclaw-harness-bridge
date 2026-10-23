@@ -2,7 +2,7 @@
   "id": "harness-bridge",
   "name": "Harness Bridge",
   "description": "Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, ...) from OpenClaw.",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "configSchema": {
     "type": "object",
     "properties": {
@@ -25,6 +25,14 @@
       "defaultTimeoutMs": {
         "type": "number",
         "description": "harness_run 默认超时毫秒"
+      },
+      "statusLineEnabled": {
+        "type": "boolean",
+        "description": "出站消息强制追加「后台任务」状态行（默认开启）"
+      },
+      "taskboardFile": {
+        "type": "string",
+        "description": "taskboard.md 路径，状态行合并其「进行中」段"
       }
     }
   },
