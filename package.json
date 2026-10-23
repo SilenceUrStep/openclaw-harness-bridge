@@ -18,7 +18,8 @@
     "params",
     "docs",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md"
   ],
   "peerDependencies": {
     "openclaw": ">=2026.5.17"
