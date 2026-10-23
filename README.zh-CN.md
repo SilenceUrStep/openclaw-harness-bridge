@@ -4,7 +4,7 @@
 
 从 OpenClaw 助手注册、配置、委派并监控多个编码 agent harness（OpenCode、Claude Code、Codex CLI 等）。
 
-> **状态**：v0.3.2 生产运行中 · RFC 社区评审中 — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
+> **状态**：v0.4.0 生产运行中 · RFC 社区评审中 — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
 >
 > 设计背景与社区讨论稿见 [docs/RFC.md](docs/RFC.md)（v0.1）· [docs/RFC-v0.3.md](docs/RFC-v0.3.md)（v0.3：SDK 级管理）
 
@@ -17,6 +17,48 @@ OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CL
 - 官方解决「OpenClaw 会话跑在 harness 上」（对话级）
 - 本插件解决「OpenClaw 助手指挥 harness 干活」（任务级）
 
+## 安装
+
+从 ClawHub 安装：
+
+```bash
+openclaw plugins install clawhub:openclaw-plugin-harness-bridge
+```
+
+或从本地目录安装：
+
+```bash
+openclaw plugins install /path/to/openclaw-plugin-harness-bridge
+```
+
+重启网关并验证：
+
+```bash
+openclaw gateway restart
+openclaw plugins inspect harness-bridge --runtime
+```
+
+## 快速开始
+
+**开箱即用（零配置）：**
+
+- 数据目录 `~/.openclaw/harness-bridge` 自动创建（SQLite 台账 + 任务日志）
+- 五个工具立即可用——跑 `harness_list` 查看各 adapter 健康状态
+- v0.4 状态行默认开启：每条出站回复自动追加「后台任务：…」状态行（数据来自台账）
+
+**可选配置（openclaw.json → plugins.entries["harness-bridge"].config）：**
+
+- `taskboardFile` — 把 markdown 任务台账的「进行中」段合并进状态行
+- `notifyCommand` — 后台任务完成时执行 shell 命令（webhook / 推送通知）
+- adapter 凭证 — 如 OpenCode HTTP transport 从网关环境变量读 `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD`
+
+**第一次委派：**
+
+```
+harness_run { "harness": "opencode", "prompt": "..." }   // 默认后台执行 + 台账
+harness_status { }                                        // 查进度 / 结果
+```
+
 ## 工具
 
 | 工具 | 作用 |
@@ -26,6 +68,11 @@ OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CL
 | `harness_run` | 委派任务（默认后台执行 + 台账；`wait=true` 同步等待） |
 | `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部） |
 | `harness_mount` | 把共享知识库目录挂载进 harness（external_directory 放行 + instructions 注入；dry-run/apply，幂等） |
+
+## v0.4 新特性
+
+- **会话透明度状态行** — `message_sending` hook 在每条出站回复末尾强制追加「后台任务：…」状态行。数据源：SQLite 台账 running 任务（pid 存活校验，死进程剔除）+ 可选 markdown 任务台账「进行中」段。AI 手写状态行时尊重原文不重复；`MEDIA:` 指令保持独立末行；`NO_REPLY`/空消息跳过；hook 全链路 fail-open——状态行失败绝不阻断消息发送。
+- 新增配置键：`statusLineEnabled`（默认开）、`taskboardFile`。
 
 ## v0.3 新特性
 
@@ -84,6 +131,8 @@ OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CL
 | `paramsFile` | 内置字典 | 模型参数字典（exact/prefix/defaults 三级匹配 + skip_patterns） |
 | `notifyCommand` | 无 | 后台任务完成时执行的 shell 命令（env: `HB_TASK_ID`/`HB_HARNESS`/`HB_STATUS`/`HB_EXIT_CODE`/`HB_SESSION_ID`/`HB_LOG_FILE`） |
 | `defaultTimeoutMs` | 600000 | `harness_run` 默认超时 |
+| `statusLineEnabled` | `true` | v0.4 — 每条出站回复追加后台任务状态行 |
+| `taskboardFile` | 无 | v0.4 — markdown 任务台账「进行中」段并入状态行 |
 
 ## 台账与日志
 
