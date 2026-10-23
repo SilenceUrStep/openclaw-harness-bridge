@@ -1,6 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { Type } from "typebox";
-import { defineToolPlugin } from "openclaw/plugin-sdk/tool-plugin";
+import {
+  defineToolPlugin,
+  getToolPluginMetadata,
+} from "openclaw/plugin-sdk/tool-plugin";
+import {
+  buildJsonPluginConfigSchema,
+  definePluginEntry,
+} from "openclaw/plugin-sdk/core";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import {
@@ -29,6 +36,7 @@ import {
 import { loadParamDict } from "./lib/params.js";
 import { switchDefaultModel, syncAdapterModels, syncDshPatch, switchDshDefaultModel } from "./lib/sync.js";
 import { mountAdapterKnowledge } from "./lib/mount.js";
+import { appendStatusLine, buildStatusLine } from "./lib/statusline.js";
 
 const configSchema = Type.Object({
   dataDir: Type.Optional(
@@ -43,6 +51,12 @@ const configSchema = Type.Object({
     }),
   ),
   defaultTimeoutMs: Type.Optional(Type.Number({ description: "harness_run 默认超时毫秒" })),
+  statusLineEnabled: Type.Optional(
+    Type.Boolean({ description: "出站消息强制追加「后台任务」状态行（默认开启）" }),
+  ),
+  taskboardFile: Type.Optional(
+    Type.String({ description: "taskboard.md 路径，状态行合并其「进行中」段" }),
+  ),
 });
 
 function paramDictFile(cfg: BridgeConfig): string {
@@ -110,7 +124,7 @@ function runResponse(rec: TaskRecord, wait: boolean): Record<string, unknown> {
 /** 工具返回里 changes 最多带多少条，防止刷屏 */
 const MAX_CHANGES = 100;
 
-export default defineToolPlugin({
+const toolEntry = defineToolPlugin({
   id: "harness-bridge",
   name: "Harness Bridge",
   description:
@@ -471,3 +485,49 @@ export default defineToolPlugin({
     }),
   ],
 });
+
+/**
+ * v0.4 session transparency：出站消息强制追加「后台任务」状态行（message_sending hook）。
+ * 外层 definePluginEntry 包装 tool entry（工具注册复用 toolEntry.register），追加消息钩子。
+ */
+const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
+  id: "harness-bridge",
+  name: "Harness Bridge",
+  description:
+    "Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, ...) from OpenClaw.",
+  configSchema: buildJsonPluginConfigSchema(configSchema as unknown as Record<string, unknown>),
+  register(api) {
+    toolEntry.register(api);
+    const cfg = (api.pluginConfig ?? {}) as BridgeConfig & {
+      statusLineEnabled?: boolean;
+      taskboardFile?: string;
+    };
+    if (cfg.statusLineEnabled === false) return;
+    api.on("message_sending", async (event) => {
+      try {
+        const dataDir = resolveDataDir(cfg);
+        const line = buildStatusLine({
+          ledgerDbPath: path.join(dataDir, "ledger.db"),
+          ledgerLegacyFile: path.join(dataDir, "ledger.jsonl"),
+          taskboardFile: cfg.taskboardFile,
+        });
+        const next = appendStatusLine(event.content, line);
+        if (next === event.content) return;
+        return { content: next };
+      } catch {
+        return; // fail-open：状态行失败绝不阻断消息发送
+      }
+    });
+  },
+});
+
+// 保留 tool-plugin 元数据（openclaw plugins build 生成 manifest 依赖）
+const toolMeta = getToolPluginMetadata(toolEntry);
+if (toolMeta) {
+  Object.defineProperty(entry, Symbol.for("openclaw.plugin-sdk.tool-plugin.metadata"), {
+    value: toolMeta,
+    enumerable: false,
+  });
+}
+
+export default entry;
