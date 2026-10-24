@@ -22,7 +22,8 @@ function rec(partial: Partial<TaskRecord>): TaskRecord {
 }
 
 beforeEach(() => {
-  spawnSyncMock.mockClear();
+  spawnSyncMock.mockReset();
+  spawnSyncMock.mockReturnValue({ status: 0, error: null }); // 默认送达成功，首次即返回
   resetNotifyThrottle();
 });
 
@@ -78,4 +79,16 @@ describe("notify 节流（v0.4.1）", () => {
     notify("echo ok", rec({ status: "timeout" }));
     expect(spawnSyncMock).toHaveBeenCalledTimes(1);
   });
+
+  it("送达失败时重试穿透（v0.4.2 兑底，最多3次尝试）", () => {
+    spawnSyncMock.mockReturnValue({ status: 1, error: null }); // 模拟微信重连窗口内发送失败
+    notify("echo ok", rec({ status: "failed" }));
+    expect(spawnSyncMock).toHaveBeenCalledTimes(3);
+  }, 15000); // 真实重试间隔 3s×2，放宽超时
+
+  it("送达失败重试后成功则提前返回", () => {
+    spawnSyncMock.mockReturnValueOnce({ status: 1, error: null }).mockReturnValueOnce({ status: 1, error: null }).mockReturnValue({ status: 0, error: null });
+    notify("echo ok", rec({ status: "failed" }));
+    expect(spawnSyncMock).toHaveBeenCalledTimes(3);
+  }, 15000);
 });

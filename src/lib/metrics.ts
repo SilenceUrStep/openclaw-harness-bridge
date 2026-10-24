@@ -1,6 +1,7 @@
 import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 import { memoryUsage } from "node:process";
 import { getHeapStatistics } from "node:v8";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 
 /**
  * v0.4.1 观测采样器：网关进程内每分钟采样内存与事件循环延迟，
@@ -131,5 +132,32 @@ export class MetricsSampler {
     if (!limit || !latest) return { pressured: false, usedPct: 0 };
     const usedPct = Math.round((latest.heapUsedMb / limit) * 100);
     return { pressured: usedPct >= thresholdPct, usedPct };
+  }
+
+  /** v0.4.2 落盘：环形缓冲写 JSON（原子写 tmp+rename），网关重启后观测数据不断档 */
+  saveToDisk(path: string): boolean {
+    try {
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ savedAt: new Date().toISOString(), samples: this.buffer }), "utf8");
+      renameSync(tmp, path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** v0.4.2 启动恢复：从落盘文件加载历史采样（按 maxEntries 截断） */
+  loadFromDisk(path: string): boolean {
+    try {
+      if (!existsSync(path)) return false;
+      const data = JSON.parse(readFileSync(path, "utf8")) as { samples?: MetricsSample[] };
+      if (Array.isArray(data?.samples) && data.samples.length > 0) {
+        this.buffer = data.samples.slice(-this.maxEntries);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
 }
