@@ -37,6 +37,12 @@ import { loadParamDict } from "./lib/params.js";
 import { switchDefaultModel, syncAdapterModels, syncDshPatch, switchDshDefaultModel } from "./lib/sync.js";
 import { mountAdapterKnowledge } from "./lib/mount.js";
 import { appendStatusLine, buildStatusLine } from "./lib/statusline.js";
+import { buildTurnContext } from "./lib/turnprepare.js";
+import { MetricsSampler } from "./lib/metrics.js";
+
+/** v0.4.1 进程内观测采样器（模块级单例，register 时启动） */
+const metricsSampler = new MetricsSampler();
+let cleanupTimer: NodeJS.Timeout | null = null;
 
 const configSchema = Type.Object({
   dataDir: Type.Optional(
@@ -56,6 +62,21 @@ const configSchema = Type.Object({
   ),
   taskboardFile: Type.Optional(
     Type.String({ description: "taskboard.md 路径，状态行合并其「进行中」段" }),
+  ),
+  turnPrepareEnabled: Type.Optional(
+    Type.Boolean({
+      description: "v0.4.1 每回合 agent_turn_prepare 注入后台任务清单（默认开启，无任务零注入）",
+    }),
+  ),
+  metricsEnabled: Type.Optional(
+    Type.Boolean({
+      description: "v0.4.1 进程内观测采样器：内存/事件循环延迟每分钟采样，环形缓冲24h（默认开启）",
+    }),
+  ),
+  eventRetentionDays: Type.Optional(
+    Type.Number({
+      description: "v0.4.1 task_event 事件流水保留天数，默认 30，0 表示不清理",
+    }),
   ),
 });
 
@@ -425,7 +446,7 @@ const toolEntry = defineToolPlugin({
       name: "harness_status",
       label: "Harness Status",
       description:
-        "查询委派任务台账（SQLite）：状态/退出码/会话 ID/耗时/输出尾部/成本与 token 聚合/失败归因（fail_reason）。running 任务若进程已消失且无退出记录，自动标记 lost。新增：events=taskId 输出单任务事件时间线；since/until 时间窗过滤；legacy=true 只读查看 v0.1 JSON Lines 旧台账。",
+        "查询委派任务台账（SQLite）：状态/退出码/会话 ID/耗时/输出尾部/成本与 token 聚合/失败归因（fail_reason）。running 任务若进程已消失且无退出记录，自动标记 lost。新增：events=taskId 输出单任务事件时间线；since/until 时间窗过滤；legacy=true 只读查看 v0.1 JSON Lines 旧台账；metrics=true 输出进程内存/事件循环延迟观测摘要（v0.4.1）。",
       parameters: Type.Object({
         taskId: Type.Optional(Type.String({ description: "精确查询单个任务" })),
         harness: Type.Optional(Type.String({ description: "按 harness 过滤" })),
@@ -441,9 +462,26 @@ const toolEntry = defineToolPlugin({
         legacy: Type.Optional(
           Type.Boolean({ description: "只读查看 v0.1 JSON Lines 旧台账（不迁移不写入）" }),
         ),
+        metrics: Type.Optional(
+          Type.Boolean({
+            description: "v0.4.1 输出进程观测摘要：RSS/堆/事件循环延迟峰值与堆压力判断",
+          }),
+        ),
       }),
       execute: async (params, config) => {
         const cfg = config as BridgeConfig;
+        if (params.metrics === true) {
+          const summary = metricsSampler.summary();
+          const pressure = metricsSampler.heapPressure();
+          return {
+            metrics: summary,
+            heapLimitMb: metricsSampler.heapLimitMb(),
+            heapPressure: pressure,
+            hint: pressure.pressured
+              ? `堆已用 ${pressure.usedPct}% 超过阈值 85%，建议排查泄漏或调堆`
+              : `堆已用 ${pressure.usedPct}%，正常范围（阈值 85%）`,
+          };
+        }
         const ledger = openLedger(cfg);
         const limit = params.limit ?? 20;
         if (params.events) {
@@ -501,21 +539,86 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
     const cfg = (api.pluginConfig ?? {}) as BridgeConfig & {
       statusLineEnabled?: boolean;
       taskboardFile?: string;
+      turnPrepareEnabled?: boolean;
+      metricsEnabled?: boolean;
+      eventRetentionDays?: number;
     };
-    if (cfg.statusLineEnabled === false) return;
-    api.on("message_sending", async (event) => {
+    const dataDir = resolveDataDir(cfg);
+    const ledgerDbPath = path.join(dataDir, "ledger.db");
+    const ledgerLegacyFile = path.join(dataDir, "ledger.jsonl");
+
+    // v0.4 状态行钩子：出站消息强制追加「后台任务」状态行
+    if (cfg.statusLineEnabled !== false) {
+      api.on("message_sending", async (event) => {
+        try {
+          const line = buildStatusLine({
+            ledgerDbPath,
+            ledgerLegacyFile,
+            taskboardFile: cfg.taskboardFile,
+          });
+          const next = appendStatusLine(event.content, line);
+          if (next === event.content) return;
+          return { content: next };
+        } catch {
+          return; // fail-open：状态行失败绝不阻断消息发送
+        }
+      });
+    }
+
+    // v0.4.1 透明度补全：每回合注入后台任务清单（无任务零注入）
+    if (cfg.turnPrepareEnabled !== false) {
+      api.on("agent_turn_prepare", async () => {
+        try {
+          const ctx = buildTurnContext({
+            ledgerDbPath,
+            ledgerLegacyFile,
+            taskboardFile: cfg.taskboardFile,
+          });
+          return ctx ? { appendContext: ctx } : undefined;
+        } catch {
+          return; // fail-open：注入失败不阻断回合
+        }
+      });
+    }
+
+    // v0.4.1 观测采样器：内存/事件循环延迟每分钟采样，环形缓冲 24h
+    if (cfg.metricsEnabled !== false) {
       try {
-        const dataDir = resolveDataDir(cfg);
-        const line = buildStatusLine({
-          ledgerDbPath: path.join(dataDir, "ledger.db"),
-          ledgerLegacyFile: path.join(dataDir, "ledger.jsonl"),
-          taskboardFile: cfg.taskboardFile,
-        });
-        const next = appendStatusLine(event.content, line);
-        if (next === event.content) return;
-        return { content: next };
+        metricsSampler.start();
       } catch {
-        return; // fail-open：状态行失败绝不阻断消息发送
+        // 采样器启动失败不影响插件主功能
+      }
+    }
+
+    // v0.4.1 台账自动清理：task_event 保留 N 天（默认 30，0=不清理）
+    const retentionDays = cfg.eventRetentionDays ?? 30;
+    if (retentionDays > 0) {
+      const cleanup = () => {
+        try {
+          const n = openLedger(cfg).cleanupEvents(retentionDays);
+          if (n > 0) {
+            console.log(`[harness-bridge] task_event 清理 ${n} 条（保留 ${retentionDays} 天）`);
+          }
+        } catch {
+          // 清理失败不影响主流程
+        }
+      };
+      cleanup();
+      if (cleanupTimer) clearInterval(cleanupTimer);
+      cleanupTimer = setInterval(cleanup, 24 * 3600_000);
+      cleanupTimer.unref?.();
+    }
+
+    // 网关停止时释放采样器与定时器
+    api.on("gateway_stop", async () => {
+      try {
+        metricsSampler.stop();
+      } catch {
+        // ignore
+      }
+      if (cleanupTimer) {
+        clearInterval(cleanupTimer);
+        cleanupTimer = null;
       }
     });
   },

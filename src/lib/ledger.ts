@@ -524,6 +524,19 @@ export class Ledger {
   }
 
   /**
+   * v0.4.1 台账自动清理：task_event 事件流水按保留天数清理（默认 30 天），
+   * task 主表保留（每任务一行量小，历史任务可查）。返回删除行数。
+   */
+  cleanupEvents(retentionDays = 30): number {
+    const db = this.ready();
+    const cutoff = new Date(Date.now() - retentionDays * 86400_000).toISOString();
+    const r = db.prepare("DELETE FROM task_event WHERE ts < ?").run(cutoff) as {
+      changes?: number | bigint;
+    };
+    return Number(r.changes ?? 0);
+  }
+
+  /**
    * v0.1 JSON Lines 台账只读读取（不迁移、不写入）。
    * 同 id 多条时取最后一条（与旧行为一致：最新追加生效）。
    */

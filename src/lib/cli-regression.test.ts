@@ -124,12 +124,31 @@ describe("cli 模式回归（v0.1 行为不变）", () => {
     expect(rec2.status).toBe("timeout");
   });
 
-  it("notifyCommand 收到 HB_* 环境变量（wait=false 后台完成时通知，v0.1 语义）", async () => {
+  it("notifyCommand 收到 HB_* 环境变量（v0.4.1 语义：仅失败/超时通知，成功不打扰）", async () => {
     const env = newRunEnv();
     const notifyFile = path.join(env.dir, "notify.txt");
-    const rec = runTask({
+    // v0.4.1 语义变更：success 不再触发通知（成功不打扰），failed/timeout 才通知
+    const successRec = runTask({
       adapter: echoAdapter,
-      prompt: "notify me",
+      prompt: "notify me success",
+      wait: false,
+      timeoutMs: 30000,
+      ledger: env.ledger,
+      tasksDir: env.tasksDir,
+      notifyCommand: `printf '%s|%s' "$HB_STATUS" "$HB_HARNESS" > ${notifyFile}`,
+    });
+    expect(successRec.status).toBe("running");
+    await new Promise((r) => setTimeout(r, 600));
+    expect(existsSync(notifyFile)).toBe(false); // 成功不通知
+
+    const failAdapter = {
+      ...echoAdapter,
+      id: "fail-echo",
+      delegate: { run: ["sh", "-c", "echo boom >&2; exit 3"], timeoutMs: 30000 },
+    } as unknown as Adapter;
+    const rec = runTask({
+      adapter: failAdapter,
+      prompt: "notify me fail",
       wait: false,
       timeoutMs: 30000,
       ledger: env.ledger,
@@ -141,7 +160,7 @@ describe("cli 模式回归（v0.1 行为不变）", () => {
     while (!existsSync(notifyFile) && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 20));
     }
-    expect(readFileSync(notifyFile, "utf8")).toBe("success|echo");
+    expect(readFileSync(notifyFile, "utf8")).toBe("failed|fail-echo");
   });
 
   it("prompt 超长截断到 500 字符（含省略号）", () => {

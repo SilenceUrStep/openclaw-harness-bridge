@@ -80,8 +80,30 @@ function finalize(
   };
 }
 
+/**
+ * v0.4.1 失败告警节流：per-harness 滑动窗口，窗口内同 harness 只推一条，
+ * 被抑制的失败计数并入下一条通知（防批量任务失败时的微信轰炸）。
+ */
+const NOTIFY_WINDOW_MS = 60_000;
+const notifyState = new Map<string, { lastTs: number; suppressed: number }>();
+
+export function resetNotifyThrottle(): void {
+  notifyState.clear();
+}
+
 export function notify(notifyCommand: string | undefined, rec: TaskRecord): void {
   if (!notifyCommand) return;
+  // 终态通知只对失败/超时触发（成功不打扰）
+  if (rec.status === "success") return;
+  const now = Date.now();
+  const key = rec.harness;
+  const st = notifyState.get(key);
+  if (st && now - st.lastTs < NOTIFY_WINDOW_MS) {
+    st.suppressed += 1;
+    return; // 窗口内已通知过该 harness，抑制本次
+  }
+  const suppressed = st?.suppressed ?? 0;
+  notifyState.set(key, { lastTs: now, suppressed: 0 });
   try {
     spawnSync("bash", ["-c", notifyCommand], {
       timeout: 15000,
@@ -94,6 +116,7 @@ export function notify(notifyCommand: string | undefined, rec: TaskRecord): void
         HB_EXIT_CODE: String(rec.exitCode ?? ""),
         HB_SESSION_ID: rec.sessionId ?? "",
         HB_LOG_FILE: rec.logFile ?? "",
+        HB_SUPPRESSED: suppressed > 0 ? String(suppressed) : "",
       },
     });
   } catch {
