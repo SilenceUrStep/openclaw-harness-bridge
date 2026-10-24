@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { openLedgerAt } from "./ledger.js";
 import { expandHome } from "./adapters.js";
 
@@ -63,23 +63,41 @@ export function ledgerRunningItems(sources: StatusLineSources): RunningItem[] {
   }
 }
 
-/** taskboard.md「🔄 进行中」段顶层条目（缩进子项不计） */
+/**
+ * v0.4.1 性能优化：taskboard 内容缓存（mtime + 30s TTL 双重检查），
+ * 每条出站消息不再重复读盘。
+ */
+const TASKBOARD_CACHE_TTL_MS = 30_000;
+const taskboardCache = new Map<string, { mtimeMs: number; cachedAt: number; items: RunningItem[] }>();
+
+export function clearTaskboardCache(): void {
+  taskboardCache.clear();
+}
+
+/** taskboard.md「🔄 进行中」段顶层条目（缩进子项不计；mtime+TTL 缓存） */
 export function taskboardRunningItems(taskboardFile?: string): RunningItem[] {
   if (!taskboardFile) return [];
   const file = expandHome(taskboardFile);
   if (!existsSync(file)) return [];
   try {
+    const stat = statSync(file);
+    const cached = taskboardCache.get(file);
+    if (cached && cached.mtimeMs === stat.mtimeMs && Date.now() - cached.cachedAt < TASKBOARD_CACHE_TTL_MS) {
+      return cached.items;
+    }
     const text = readFileSync(file, "utf8");
     const block = text.split(/^##\s+/m).find((b) => b.startsWith("🔄 进行中"));
-    if (!block) return [];
     const items: RunningItem[] = [];
-    for (const raw of block.split("\n").slice(1)) {
-      const m = raw.match(/^[-*]\s+(.*)$/);
-      if (!m) continue;
-      const item = m[1].replace(/\*\*/g, "").trim();
-      if (!item) continue;
-      items.push({ name: snippet(item, 40) });
+    if (block) {
+      for (const raw of block.split("\n").slice(1)) {
+        const m = raw.match(/^[-*]\s+(.*)$/);
+        if (!m) continue;
+        const item = m[1].replace(/\*\*/g, "").trim();
+        if (!item) continue;
+        items.push({ name: snippet(item, 40) });
+      }
     }
+    taskboardCache.set(file, { mtimeMs: stat.mtimeMs, cachedAt: Date.now(), items });
     return items;
   } catch {
     return [];
@@ -95,11 +113,18 @@ export function formatStatusLine(items: RunningItem[]): string {
   return `后台任务：${items.length}个（${shown.join("｜")}${more}）`;
 }
 
-export function buildStatusLine(sources: StatusLineSources): string {
-  return formatStatusLine([
-    ...ledgerRunningItems(sources),
-    ...taskboardRunningItems(sources.taskboardFile),
-  ]);
+/**
+ * v0.4.1 软超时预算：buildStatusLine 各步骤间检查耗时，
+ * 超预算（默认 50ms）跳过后续数据源，返回已有结果（fail-open 不阻断消息发送）。
+ */
+export function buildStatusLine(sources: StatusLineSources, budgetMs = 50): string {
+  const start = Date.now();
+  const items: RunningItem[] = [];
+  items.push(...ledgerRunningItems(sources));
+  if (Date.now() - start < budgetMs) {
+    items.push(...taskboardRunningItems(sources.taskboardFile));
+  }
+  return formatStatusLine(items);
 }
 
 const STATUS_LINE_RE = /^后台任务[：:]/m;

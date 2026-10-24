@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-harness-bridge",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Register, configure, delegate and monitor coding-agent harnesses from OpenClaw.",
   "type": "module",
   "private": true,

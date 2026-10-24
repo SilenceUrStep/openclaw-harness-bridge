@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   appendStatusLine,
   buildStatusLine,
+  clearTaskboardCache,
   formatStatusLine,
   ledgerRunningItems,
   processAlive,
@@ -154,5 +155,48 @@ describe("buildStatusLine", () => {
 describe("processAlive", () => {
   it("当前进程存活", () => {
     expect(processAlive(process.pid)).toBe(true);
+  });
+});
+
+describe("taskboardRunningItems 缓存（v0.4.1）", () => {
+  it("mtime 不变时走缓存，文件变化后重新读取", async () => {
+    clearTaskboardCache();
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-sl-cache-"));
+    const tb = path.join(dir, "taskboard.md");
+    writeFileSync(tb, "## 🔄 进行中\n\n- 任务甲\n");
+    expect(taskboardRunningItems(tb).map((i) => i.name)).toEqual(["任务甲"]);
+    // 同内容重读（缓存命中路径）
+    expect(taskboardRunningItems(tb).map((i) => i.name)).toEqual(["任务甲"]);
+    // 修改文件（mtime 变化）→ 缓存失效重新读
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(tb, "## 🔄 进行中\n\n- 任务乙\n");
+    const { utimesSync } = await import("node:fs");
+    const now = new Date();
+    utimesSync(tb, now, now); // 确保 mtime 变化
+    expect(taskboardRunningItems(tb).map((i) => i.name)).toEqual(["任务乙"]);
+    clearTaskboardCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("buildStatusLine 软超时预算：默认预算内双源合并正常", () => {
+    clearTaskboardCache();
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-sl-budget-"));
+    const tb = path.join(dir, "taskboard.md");
+    writeFileSync(tb, "## 🔄 进行中\n\n- 预算任务\n");
+    const line = buildStatusLine({ taskboardFile: tb }, 50);
+    expect(line).toContain("预算任务");
+    clearTaskboardCache();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("buildStatusLine 预算为 0 时跳过 taskboard 段（仍返回台账结果）", () => {
+    clearTaskboardCache();
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-sl-budget0-"));
+    const tb = path.join(dir, "taskboard.md");
+    writeFileSync(tb, "## 🔄 进行中\n\n- 不该出现的任务\n");
+    const line = buildStatusLine({ taskboardFile: tb }, 0);
+    expect(line).toBe("后台任务：无");
+    clearTaskboardCache();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

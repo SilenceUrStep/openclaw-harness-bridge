@@ -193,4 +193,35 @@ describe("Ledger (SQLite)", () => {
     l2.close();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("cleanupEvents：老事件删、新事件留、task 主表保留（v0.4.1）", () => {
+    const l = tmpLedger();
+    l.append(rec({ id: "e1", harness: "echo", status: "success" }));
+    const oldTs = new Date(Date.now() - 40 * 86400_000).toISOString();
+    const newTs = new Date().toISOString();
+    l.addEvents("e1", [
+      { type: "started", payload: { v: "old" }, ts: oldTs },
+      { type: "finished", payload: { v: "new" }, ts: newTs },
+    ]);
+    const deleted = l.cleanupEvents(30);
+    expect(deleted).toBe(1);
+    const events = l.getEvents("e1");
+    expect(events.length).toBe(1);
+    expect(events[0].ts).toBe(newTs);
+    // task 主表不受清理影响
+    expect(l.getById("e1")).toBeDefined();
+    l.close();
+    rmSync(path.dirname(l.dbPath), { recursive: true, force: true });
+  });
+
+  it("cleanupEvents retentionDays=0 语义由调用方控制（负数/0 不调用即可）", () => {
+    const l = tmpLedger();
+    l.append(rec({ id: "e2", harness: "echo", status: "success" }));
+    l.addEvents("e2", [{ type: "started", payload: {}, ts: new Date().toISOString() }]);
+    // 保留 365 天 → 什么都不删
+    expect(l.cleanupEvents(365)).toBe(0);
+    expect(l.getEvents("e2").length).toBe(1);
+    l.close();
+    rmSync(path.dirname(l.dbPath), { recursive: true, force: true });
+  });
 });
