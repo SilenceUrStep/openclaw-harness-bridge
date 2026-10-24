@@ -95,7 +95,7 @@ harness_run(task)
 ### 3.4 会话管理能力
 
 - **fork-before-retry**：重试失败任务时先 `POST /session/:id/fork` 复制会话再续跑，原会话历史不被污染——幂等重试的基础设施
-- **title 规范**：`{任务标识}; {步骤}`（如 `CHNLNETCOR-33413; 接口评估`），台账按 title 前缀检索
+- **title 规范**：`{任务标识}; {步骤}`（如 `PROJ-12345; 接口评估`），台账按 title 前缀检索
 - **variant 分层**：adapter/任务级可指定 reasoning effort（简单任务 minimal 档省 token）
 - **agent 选择**：纯查询任务可路由到 `explore` agent（只读、快速）
 
