@@ -104,23 +104,39 @@ export function notify(notifyCommand: string | undefined, rec: TaskRecord): void
   }
   const suppressed = st?.suppressed ?? 0;
   notifyState.set(key, { lastTs: now, suppressed: 0 });
+  const env = {
+    ...process.env,
+    HB_TASK_ID: rec.id,
+    HB_HARNESS: rec.harness,
+    HB_STATUS: rec.status,
+    HB_EXIT_CODE: String(rec.exitCode ?? ""),
+    HB_SESSION_ID: rec.sessionId ?? "",
+    HB_LOG_FILE: rec.logFile ?? "",
+    HB_SUPPRESSED: suppressed > 0 ? String(suppressed) : "",
+  };
+  // v0.4.2 送达兜底：微信每20分钟重连窗口(:02/:22/:42)内发送必失败，
+  // 失败告警自身不能静默丢失，重试穿透（最多3次尝试，间隔3s）
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = spawnSync("bash", ["-c", notifyCommand], {
+        timeout: 15000,
+        encoding: "utf8",
+        env,
+      });
+      if (r.status === 0 && !r.error) return; // 送达成功
+    } catch {
+      // 重试
+    }
+    if (attempt < 3) syncSleep(3000);
+  }
+}
+
+/** 同步等待（child exit 回调内无异步上下文，Atomics.wait 标准用法） */
+function syncSleep(ms: number): void {
   try {
-    spawnSync("bash", ["-c", notifyCommand], {
-      timeout: 15000,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        HB_TASK_ID: rec.id,
-        HB_HARNESS: rec.harness,
-        HB_STATUS: rec.status,
-        HB_EXIT_CODE: String(rec.exitCode ?? ""),
-        HB_SESSION_ID: rec.sessionId ?? "",
-        HB_LOG_FILE: rec.logFile ?? "",
-        HB_SUPPRESSED: suppressed > 0 ? String(suppressed) : "",
-      },
-    });
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   } catch {
-    // 通知失败不影响任务结果
+    // 平台不支持时退化为继续（不阻塞主流程）
   }
 }
 

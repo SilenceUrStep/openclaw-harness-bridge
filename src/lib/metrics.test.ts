@@ -57,4 +57,33 @@ describe("MetricsSampler", () => {
       s.stop();
     }
   });
+
+  it("落盘+恢复往返（v0.4.2）：重启后观测数据不断档", () => {
+    const { mkdtempSync, rmSync } = require("node:fs");
+    const { tmpdir } = require("node:os");
+    const path = require("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-metrics-"));
+    const file = path.join(dir, "metrics.json");
+    try {
+      const s1 = new MetricsSampler();
+      s1.start();
+      expect(s1.saveToDisk(file)).toBe(true);
+      s1.stop();
+      // 新实例模拟网关重启后恢复
+      const s2 = new MetricsSampler();
+      expect(s2.loadFromDisk(file)).toBe(true);
+      const sum = s2.summary();
+      expect(sum.samples).toBeGreaterThanOrEqual(1);
+      expect(sum.latest).not.toBeNull();
+      // 不留临时文件
+      expect(require("node:fs").existsSync(`${file}.tmp`)).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("loadFromDisk：文件不存在返回 false 不抛错", () => {
+    const s = new MetricsSampler();
+    expect(s.loadFromDisk(`/tmp/hb-nonexistent-${Date.now()}.json`)).toBe(false);
+  });
 });

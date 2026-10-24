@@ -69,6 +69,21 @@ harness_status { }                                        // 查进度 / 结果
 | `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部） |
 | `harness_mount` | 把共享知识库目录挂载进 harness（external_directory 放行 + instructions 注入；dry-run/apply，幂等） |
 
+## v0.4.2 新特性
+
+- **派发自动登记** — `before_tool_call`/`after_tool_call` 双钩子：`harness_run` 派发时自动往 taskboard「🤖 自动登记」段写条目（pending → 绑定 taskId → 终态惰性清理），治承诺悬空，全链路 fail-open。
+- **告警送达兑底** — 失败通知重试穿透（最多 3 次尝试，间隔 3s），微信 20 分钟重连窗口内不再静默丢告警。
+- **观测数据落盘** — 采样器环形缓冲每小时持久化 + 启动恢复 + 网关停止 flush，重启后观测数据不断档。
+
+## v0.4.1 新特性
+
+- **回合任务注入** — `agent_turn_prepare` hook 每回合注入后台任务清单（无任务零注入），治承诺悬空。
+- **失败主动告警** — 任务失败/超时推微信（`notifyCommand`），per-harness 60s 节流防轰炸，抑制计数并入下一条。
+- **性能优化** — taskboard mtime 缓存（30s TTL）+ 状态行软超时预算（50ms）。
+- **观测采样器** — 内存/堆/事件循环延迟每分钟采样，环形缓冲 24h，`harness_status metrics=true` 查询，堆压力判断（85% 阈值）。
+- **台账自动清理** — `task_event` 保留 30 天自动清理。
+- 新增配置键：`turnPrepareEnabled`、`metricsEnabled`、`eventRetentionDays`、`notifyCommand`。
+
 ## v0.4 新特性
 
 - **会话透明度状态行** — `message_sending` hook 在每条出站回复末尾强制追加「后台任务：…」状态行。数据源：SQLite 台账 running 任务（pid 存活校验，死进程剔除）+ 可选 markdown 任务台账「进行中」段。AI 手写状态行时尊重原文不重复；`MEDIA:` 指令保持独立末行；`NO_REPLY`/空消息跳过；hook 全链路 fail-open——状态行失败绝不阻断消息发送。

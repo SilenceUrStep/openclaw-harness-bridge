@@ -2,7 +2,7 @@
 
 Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, …) from your OpenClaw assistant.
 
-> **Status**: v0.4.0 running in production · RFC under community review — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
+> **Status**: v0.4.2 running in production · RFC under community review — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
 >
 > Design background and the community discussion draft: [docs/RFC.md](docs/RFC.md) (v0.1) · [docs/RFC-v0.3.md](docs/RFC-v0.3.md) (v0.3: SDK-level management) · [中文文档](README.zh-CN.md)
 
@@ -64,6 +64,21 @@ harness_status { }                                        // poll progress / res
 | `harness_run` | Delegate a task (background + ledger by default; `wait=true` for synchronous runs) |
 | `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail) |
 | `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
+
+## What's new in v0.4.2
+
+- **Auto dispatch logging** — `before_tool_call`/`after_tool_call` hooks: every background `harness_run` dispatch is auto-logged to the taskboard's "🤖 自动登记" section (pending entry → bound taskId → lazy prune on completion). Cures "promised but untracked"; fail-open throughout.
+- **Notify delivery retry** — failure notifications retry up to 3 attempts (3s apart), surviving the WeChat 20-minute reconnect windows that used to silently drop alerts.
+- **Metrics persistence** — sampler ring buffer persisted hourly + restored on startup + flushed on gateway stop; observation data survives restarts.
+
+## What's new in v0.4.1
+
+- **Per-turn task injection** — an `agent_turn_prepare` hook injects the running-task list into every turn (zero injection when idle).
+- **Proactive failure alerts** — failed/timed-out tasks push a WeChat alert via `notifyCommand`, with a per-harness 60s throttle (suppressed counts carried into the next alert).
+- **Performance** — taskboard mtime cache (30s TTL) + status-line soft time budget (50ms).
+- **Metrics sampler** — memory/heap/event-loop p99 sampled every minute into a 24h ring buffer; query via `harness_status metrics=true`; heap-pressure check (85% threshold).
+- **Ledger auto-cleanup** — `task_event` rows older than 30 days pruned automatically.
+- New config keys: `turnPrepareEnabled`, `metricsEnabled`, `eventRetentionDays`, `notifyCommand`.
 
 ## What's new in v0.4
 

@@ -39,10 +39,29 @@ import { mountAdapterKnowledge } from "./lib/mount.js";
 import { appendStatusLine, buildStatusLine } from "./lib/statusline.js";
 import { buildTurnContext } from "./lib/turnprepare.js";
 import { MetricsSampler } from "./lib/metrics.js";
+import { registerDispatch, bindTaskId, removeEntry, pruneFinished } from "./lib/taskboard-auto.js";
 
 /** v0.4.1 进程内观测采样器（模块级单例，register 时启动） */
 const metricsSampler = new MetricsSampler();
 let cleanupTimer: NodeJS.Timeout | null = null;
+let metricsSaveTimer: NodeJS.Timeout | null = null;
+/** v0.4.2 自动登记：toolCallId → 预登记条目 key（before/after 钩子串联） */
+const autoRegMap = new Map<string, string>();
+
+/** v0.4.2 惰性清理用：台账中仍 running（pid 存活）的 taskId 集合 */
+function aliveRunningTaskIds(cfg: BridgeConfig): Set<string> {
+  try {
+    const ledger = openLedger(cfg);
+    const recs = ledger.latest({ status: "running" }, 50);
+    const ids = new Set<string>();
+    for (const r of recs) {
+      if (r.pid ? processAlive(r.pid) : true) ids.add(r.id);
+    }
+    return ids;
+  } catch {
+    return new Set();
+  }
+}
 
 const configSchema = Type.Object({
   dataDir: Type.Optional(
@@ -585,9 +604,53 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
     if (cfg.metricsEnabled !== false) {
       try {
         metricsSampler.start();
+        // v0.4.2 落盘：启动恢复 + 每小时持久化，网关重启观测数据不断档
+        const metricsFile = path.join(dataDir, "metrics.json");
+        metricsSampler.loadFromDisk(metricsFile);
+        if (metricsSaveTimer) clearInterval(metricsSaveTimer);
+        metricsSaveTimer = setInterval(() => {
+          try {
+            metricsSampler.saveToDisk(metricsFile);
+          } catch {
+            // 落盘失败不影响采样
+          }
+        }, 3600_000);
+        metricsSaveTimer.unref?.();
       } catch {
         // 采样器启动失败不影响插件主功能
       }
+    }
+
+    // v0.4.2 自动登记：harness_run 派发自动写 taskboard「🤖 自动登记」段，治承诺悬空
+    if (cfg.turnPrepareEnabled !== false && cfg.taskboardFile) {
+      const tbFile = cfg.taskboardFile as string;
+      api.on("before_tool_call", async (event) => {
+        try {
+          if (event.toolName !== "harness_run" || !event.toolCallId) return;
+          if (event.params?.wait === true) return; // 同步任务不登记
+          pruneFinished(tbFile, aliveRunningTaskIds(cfg));
+          const key = registerDispatch(tbFile, String(event.params?.harness ?? ""), String(event.params?.prompt ?? ""));
+          if (key) autoRegMap.set(event.toolCallId, key);
+        } catch {
+          return; // fail-open：登记失败不阻断派发
+        }
+      });
+      api.on("after_tool_call", async (event) => {
+        try {
+          if (event.toolName !== "harness_run" || !event.toolCallId) return;
+          const key = autoRegMap.get(event.toolCallId);
+          if (!key) return;
+          autoRegMap.delete(event.toolCallId);
+          const result = event.result as { taskId?: string } | undefined;
+          if (result?.taskId) {
+            bindTaskId(tbFile, key, result.taskId);
+          } else {
+            removeEntry(tbFile, key); // 派发未成功不留痕
+          }
+        } catch {
+          return; // fail-open
+        }
+      });
     }
 
     // v0.4.1 台账自动清理：task_event 保留 N 天（默认 30，0=不清理）
@@ -609,8 +672,13 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
       cleanupTimer.unref?.();
     }
 
-    // 网关停止时释放采样器与定时器
+    // 网关停止时释放采样器与定时器（v0.4.2：停止前 flush 观测数据）
     api.on("gateway_stop", async () => {
+      try {
+        metricsSampler.saveToDisk(path.join(dataDir, "metrics.json"));
+      } catch {
+        // ignore
+      }
       try {
         metricsSampler.stop();
       } catch {
@@ -619,6 +687,10 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
       if (cleanupTimer) {
         clearInterval(cleanupTimer);
         cleanupTimer = null;
+      }
+      if (metricsSaveTimer) {
+        clearInterval(metricsSaveTimer);
+        metricsSaveTimer = null;
       }
     });
   },
