@@ -54,9 +54,32 @@ export interface TaskRecord {
   forkedFrom?: string | null;
   /** transport 降级标记：1 = http 探活失败回落 cli */
   fallbackUsed?: boolean;
+  /** v0.4.3 自动重试链：本次任务重试自哪个失败任务 */
+  retryOf?: string | null;
+  /** 超时/会话核查异常时的工作区产出探测：true = cwd 有未提交产出（failed + hasOutput 即 timeout_with_output 语义） */
+  hasOutput?: boolean;
 }
 
-export type LedgerEventType = "step" | "tool_use" | "text" | "error" | "status" | "permission" | "retry";
+export type LedgerEventType =
+  | "step"
+  | "tool_use"
+  | "text"
+  | "error"
+  | "status"
+  | "permission"
+  | "retry"
+  | "route"
+  | "fallback"
+  | "health"
+  | "health_change"
+  | "host_version"
+  | "selfcheck"
+  /** 超时两级判定：流静默触发 / 会话核查 / 核查仍 running / 核查补结算 / 产出探测 */
+  | "idle_triggered"
+  | "session_check"
+  | "session_still_running"
+  | "session_settled"
+  | "output_detected";
 
 export interface LedgerEvent {
   taskId: string;
@@ -173,6 +196,8 @@ function migrateColumns(driver: SqlDriver): void {
     cost_cache_read_tokens: "INTEGER",
     forked_from: "TEXT",
     fallback_used: "INTEGER",
+    retry_of: "TEXT",
+    has_output: "INTEGER",
     prompt: "TEXT",
     cwd: "TEXT",
     pid: "INTEGER",
@@ -227,6 +252,8 @@ CREATE TABLE IF NOT EXISTS task (
   cost_cache_read_tokens INTEGER,
   forked_from TEXT,
   fallback_used INTEGER DEFAULT 0,
+  retry_of TEXT,
+  has_output INTEGER,
   prompt TEXT,
   cwd TEXT,
   pid INTEGER,
@@ -274,6 +301,8 @@ const TASK_COLUMNS = [
   "cost_cache_read_tokens",
   "forked_from",
   "fallback_used",
+  "retry_of",
+  "has_output",
   "prompt",
   "cwd",
   "pid",
@@ -313,6 +342,8 @@ function rowToRecord(r: TaskRow): TaskRecord {
   if (r.cost_cache_read_tokens != null) rec.costCacheReadTokens = r.cost_cache_read_tokens as number;
   if (r.forked_from != null) rec.forkedFrom = r.forked_from as string;
   if (r.fallback_used != null) rec.fallbackUsed = r.fallback_used === 1;
+  if (r.retry_of != null) rec.retryOf = r.retry_of as string;
+  if (r.has_output != null) rec.hasOutput = r.has_output === 1;
   if (r.prompt != null) rec.prompt = r.prompt as string;
   if (r.cwd != null) rec.cwd = r.cwd as string;
   if (r.pid != null) rec.pid = r.pid as number;
@@ -348,6 +379,8 @@ function recordToRow(rec: TaskRecord): TaskRow {
   if (rec.costCacheReadTokens !== undefined) row.cost_cache_read_tokens = rec.costCacheReadTokens ?? null;
   if (rec.forkedFrom !== undefined) row.forked_from = rec.forkedFrom ?? null;
   if (rec.fallbackUsed !== undefined) row.fallback_used = rec.fallbackUsed ? 1 : 0;
+  if (rec.retryOf !== undefined) row.retry_of = rec.retryOf ?? null;
+  if (rec.hasOutput !== undefined) row.has_output = rec.hasOutput ? 1 : 0;
   if (rec.prompt !== undefined) row.prompt = rec.prompt ?? null;
   if (rec.cwd !== undefined) row.cwd = rec.cwd ?? null;
   if (rec.pid !== undefined) row.pid = rec.pid ?? null;
@@ -479,6 +512,8 @@ export class Ledger {
   addEvents(taskId: string, events: Array<Omit<LedgerEvent, "taskId" | "seq">>): void {
     if (events.length === 0) return;
     const db = this.ready();
+    // node:sqlite 默认启用外键：合成任务 id（hb_watchdog/hb_selfcheck 等系统事件流）自动补父行
+    db.prepare("INSERT OR IGNORE INTO task (id, harness, transport, status) VALUES (?, '__system__', 'cli', 'running')").run(taskId);
     let seq = this.seqCounters.get(taskId) ?? -1;
     if (seq < 0) {
       const r = db

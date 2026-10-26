@@ -1,4 +1,4 @@
-import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
+import { monitorEventLoopDelay, type ELDHistogram } from "node:perf_hooks";
 import { memoryUsage } from "node:process";
 import { getHeapStatistics } from "node:v8";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -40,7 +40,7 @@ export interface MetricsSummary {
 const MB = 1024 * 1024;
 
 export class MetricsSampler {
-  private histogram: IntervalHistogram | null = null;
+  private histogram: ELDHistogram | null = null;
   private timer: NodeJS.Timeout | null = null;
   private buffer: MetricsSample[] = [];
 

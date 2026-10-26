@@ -1,5 +1,6 @@
 import { appendFileSync } from "node:fs";
 import path from "node:path";
+import { execSync, spawn } from "node:child_process";
 import type { Adapter } from "./adapters.js";
 import { truncate2kb, type Ledger, type LedgerEventType, type TaskRecord, type TaskStatus } from "./ledger.js";
 import { buildHttpHeaders, type HttpTransport } from "./transport.js";
@@ -14,6 +15,12 @@ const BACKOFF_MAX_MS = 30000;
 const OUTPUT_TAIL_CHARS = 2000;
 /** opencode fork 端点缺省（RFC §7 delegate.fork） */
 const DEFAULT_FORK_PATH = "/session/{sessionId}/fork";
+/** 超时两级判定默认值：SSE 静默 5 分钟核查一次，总时长兜底 2 小时 */
+const DEFAULT_IDLE_TIMEOUT_MS = 300_000;
+const DEFAULT_MAX_DURATION_MS = 7_200_000;
+const DEFAULT_SESSION_CHECK_RETRIES = 3;
+/** 产出探测 git 命令超时 */
+const OUTPUT_PROBE_TIMEOUT_MS = 10_000;
 
 export type StructuredKind =
   | "step_start"
@@ -96,6 +103,82 @@ function messageOf(e: unknown): string | undefined {
     if (typeof m === "string") return m;
   }
   return undefined;
+}
+
+/** 会话核查状态：missing=404 不存在；error=非 404 HTTP 错误或网络失败；unknown=响应无状态字段（保守按 running 处理） */
+export type SessionState = "idle" | "running" | "missing" | "error" | "unknown";
+
+/**
+ * /session/{id} 响应 → 会话状态。兼容三种形态：
+ * status 字符串、status 对象 {type}（与 SSE session.status 信封同构）、time.finished 时间戳。
+ * 枚举：busy/running/active/retry/working → running；idle/completed/finished/done → idle；
+ * error/failed/errored → error；无字段 → unknown（保守视为 running，绝不据此杀任务）。
+ */
+export function parseSessionState(session: unknown): SessionState {
+  if (!session || typeof session !== "object") return "unknown";
+  const s = session as Record<string, unknown>;
+  const status = s.status;
+  const raw =
+    typeof status === "string"
+      ? status
+      : status && typeof status === "object"
+        ? ((status as Record<string, unknown>).type as string | undefined)
+        : undefined;
+  if (raw) {
+    const v = raw.toLowerCase();
+    if (["busy", "running", "active", "retry", "working"].includes(v)) return "running";
+    if (["idle", "completed", "finished", "done"].includes(v)) return "idle";
+    if (["error", "failed", "errored"].includes(v)) return "error";
+    return "unknown";
+  }
+  const time = s.time as Record<string, unknown> | undefined;
+  if (time && typeof time === "object" && typeof time.finished === "string") return "idle";
+  return "unknown";
+}
+
+/**
+ * 产出探测：cwd 下执行 git status --porcelain，非空输出即视为有未提交产出。
+ * 非 git 仓库 / 命令失败 / 无 cwd 一律视为无产出，不抛错。
+ */
+export function probeWorkspaceOutput(cwd?: string): boolean {
+  if (!cwd) return false;
+  try {
+    const out = execSync("git status --porcelain", {
+      cwd,
+      encoding: "utf8",
+      timeout: OUTPUT_PROBE_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return String(out).trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** 会话停滞告警：spawn fire-and-forget（同 watchdog 告警通道；任务未终态，不走 notify 节流） */
+function sendStallAlert(
+  notifyCommand: string | undefined,
+  taskId: string,
+  sessionId: string,
+  detail: string,
+): void {
+  if (!notifyCommand) return;
+  try {
+    const child = spawn("bash", ["-c", notifyCommand], {
+      env: {
+        ...process.env,
+        HB_ALERT: "task_stall",
+        HB_TASK_ID: taskId,
+        HB_SESSION_ID: sessionId,
+        HB_DETAIL: detail.length > 800 ? `${detail.slice(0, 800)}…` : detail,
+        HB_TIME: new Date().toISOString(),
+      },
+      stdio: "ignore",
+    });
+    child.unref?.();
+  } catch {
+    // 告警失败不影响观察
+  }
 }
 
 /** message part → 结构化事件（SSE 与 /message 补拉共用） */
@@ -322,16 +405,27 @@ export interface HttpRunOptions {
   forkFromSessionId?: string;
   cwd?: string;
   wait: boolean;
+  /** 旧版总时长超时（保留映射兼容）：未显式传 maxDurationMs 时作为总时长兜底 */
   timeoutMs: number;
+  /** SSE 流静默核查阈值毫秒（默认 300000，0=禁用静默核查） */
+  idleTimeoutMs?: number;
+  /** 总时长兜底毫秒（默认 7200000，0=禁用兜底），触发后核查会话状态而非直接判失败 */
+  maxDurationMs?: number;
+  /** 连续会话核查仍 running 的告警阈值次数（默认 3） */
+  sessionCheckMaxRetries?: number;
   ledger: Ledger;
   tasksDir: string;
   notifyCommand?: string;
   fallbackUsed?: boolean;
+  /** v0.4.3 后台任务终态回调（重试/降级编排用）；wait=true 不触发 */
+  onFinal?: (rec: TaskRecord) => void;
 }
 
 /**
  * opencode HTTP 直调任务：POST /session → prompt_async → SSE /event（sessionID 过滤，
  * 断线退避重连 + /message 补拉）→ idle 结算（GET /session 读 cost/tokens）。
+ * 超时两级判定：流静默超 idleTimeoutMs 触发会话核查（不判死，按会话真实状态分流）；
+ * 总时长 maxDurationMs 兜底（核查后按会话状态结算，绝不直接 abort 判 failed）。
  * wait=true 返回终态记录；wait=false 后台执行并立即返回运行中快照。
  */
 export async function runHttpTask(opts: HttpRunOptions): Promise<TaskRecord> {
@@ -356,7 +450,15 @@ export async function runHttpTask(opts: HttpRunOptions): Promise<TaskRecord> {
   opts.ledger.append(base);
   const exec = executeHttpTask(opts, base);
   if (opts.wait) return exec;
-  exec.catch(() => {}); // 失败已在 executeHttpTask 内部落台账，防止 unhandled rejection
+  exec
+    .then((rec) => {
+      try {
+        opts.onFinal?.(rec);
+      } catch {
+        // 编排回调失败不影响台账
+      }
+    })
+    .catch(() => {}); // 失败已在 executeHttpTask 内部落台账，防止 unhandled rejection
   return { ...base };
 }
 
@@ -367,31 +469,40 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
   const jsonHeaders = { ...headers, "content-type": "application/json" };
   const startedMs = Date.now();
   const ac = new AbortController();
-  const streamAc = new AbortController();
+  let streamAc = new AbortController();
+
+  const maxDurationMs = opts.maxDurationMs ?? opts.timeoutMs ?? DEFAULT_MAX_DURATION_MS;
+  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  const sessionCheckMaxRetries = opts.sessionCheckMaxRetries ?? DEFAULT_SESSION_CHECK_RETRIES;
 
   let settled = false;
   let finished = false;
-  let timedOut = false;
+  let maxFired = false;
+  /** 待处理的核查请求（idle 定时器/兜底定时器打断 SSE 读循环时置位，循环顶部消费） */
+  let checkCause: "idle_silence" | "max_duration" | null = null;
   let sessionId: string | null = opts.resumeSessionId ?? null;
+  let lastEventAt = Date.now();
+  let consecutiveRunningChecks = 0;
+  let stallAlerted = false;
   let lastText = "";
   let failReason: string | undefined;
   let permissionPending: { id?: string; title?: string } | null = null;
   const seenKeys = new Set<string>();
   const pendingEvents: Array<{ type: string; payload: unknown; ts: string }> = [];
 
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try {
-      ac.abort();
-      streamAc.abort();
-    } catch {
-      // 已 abort
-    }
-  }, opts.timeoutMs);
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let maxTimer: ReturnType<typeof setTimeout> | null = null;
 
   const flush = (): void => {
     if (pendingEvents.length === 0) return;
     ledger.addEvents(base.id, pendingEvents.splice(0));
+  };
+
+  /** 超时两级判定的核查过程事件（idle_triggered/session_check/...）即时落台账 */
+  const trackEvent = (type: string, payload: unknown): void => {
+    if (finished) return;
+    pendingEvents.push({ type, payload, ts: new Date().toISOString() });
+    flush();
   };
 
   const logEvent = (e: StructuredEvent): void => {
@@ -402,10 +513,61 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
     }
   };
 
+  /** 核查请求：打断当前 SSE 读循环（会话核查自身用独立 controller，不受影响） */
+  const requestCheck = (cause: "idle_silence" | "max_duration"): void => {
+    if (settled || finished) return;
+    if (cause === "idle_silence" && maxFired) return;
+    if (cause === "max_duration") {
+      if (maxFired) return;
+      maxFired = true;
+      try {
+        ac.abort(); // 打断派发阶段挂起的请求，防止任务悬挂
+      } catch {
+        // 已 abort
+      }
+    }
+    checkCause = cause;
+    try {
+      streamAc.abort();
+    } catch {
+      // 已 abort
+    }
+  };
+
+  const armIdle = (): void => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    if (idleTimeoutMs <= 0) return; // 0=禁用 idle 检测
+    idleTimer = setTimeout(() => {
+      if (settled || finished) return;
+      trackEvent("idle_triggered", {
+        silentMs: idleTimeoutMs,
+        lastEventAt: new Date(lastEventAt).toISOString(),
+      });
+      requestCheck("idle_silence");
+    }, idleTimeoutMs);
+  };
+
+  /** SSE 事件活性：刷新 lastEventAt、重置连续核查计数、重挂 idle 定时器 */
+  const touchActivity = (): void => {
+    lastEventAt = Date.now();
+    consecutiveRunningChecks = 0;
+    stallAlerted = false;
+    armIdle();
+  };
+
+  maxTimer = maxDurationMs > 0 ? setTimeout(() => requestCheck("max_duration"), maxDurationMs) : null;
+
   const finalize = (status: TaskStatus, reason?: string, extra?: Partial<TaskRecord>): TaskRecord => {
     if (finished) return { ...base, status };
     finished = true;
-    clearTimeout(timer);
+    if (maxTimer) clearTimeout(maxTimer);
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
     try {
       streamAc.abort();
     } catch {
@@ -438,6 +600,7 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
 
   const handleStructured = (e: StructuredEvent): void => {
     if (settled || finished) return;
+    touchActivity();
     logEvent(e);
     const le = structuredToLedger(e);
     pendingEvents.push({ type: le.type, payload: le.payload, ts: e.ts });
@@ -478,6 +641,7 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
     } catch {
       return; // 非法帧跳过（stdout 纯度契约同款语义）
     }
+    touchActivity();
     const sid = extractEventSessionId(env);
     if (sessionId && sid && sid !== sessionId) return;
     const part = (env?.properties as Record<string, unknown> | undefined)?.part as
@@ -519,6 +683,99 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
         }
       });
     }
+  };
+
+  /** 正常结算（session.idle 或核查发现已 idle）：读 cost/tokens → success（带 failReason 时 failed） */
+  const settleSuccess = async (sessionJson?: Record<string, unknown>): Promise<TaskRecord> => {
+    settled = true;
+    let usage: ReturnType<typeof extractUsage> = {};
+    try {
+      if (sessionJson) {
+        usage = extractUsage(sessionJson);
+      } else {
+        const res = await fetch(`${baseUrl}/session/${sessionId}`, { headers, signal: ac.signal });
+        if (res.ok) usage = extractUsage((await res.json()) as Record<string, unknown>);
+      }
+    } catch {
+      // 结算读不到 session 数据不阻断终态写入
+    }
+    if (permissionPending && !failReason) {
+      const pending = permissionPending as { id?: string; title?: string };
+      failReason = `permission.asked 未响应: ${pending.title ?? pending.id ?? "unknown"}`;
+    }
+    const extra: Partial<TaskRecord> = {
+      ...usage,
+      ...(usage.cost != null ? { costTotal: usage.cost } : {}),
+      ...(usage.tokensInput != null ? { costInputTokens: usage.tokensInput } : {}),
+      ...(usage.tokensOutput != null ? { costOutputTokens: usage.tokensOutput } : {}),
+      ...(usage.tokensReasoning != null ? { costReasoningTokens: usage.tokensReasoning } : {}),
+      ...(usage.tokensCacheRead != null ? { costCacheReadTokens: usage.tokensCacheRead } : {}),
+    };
+    return finalize(failReason ? "failed" : "success", undefined, extra);
+  };
+
+  /**
+   * 会话核查（两级判定核心）：GET /session/{id} 按真实状态分流，绝不直接判死。
+   * 返回 null = 会话仍存活，调用方重挂 SSE 继续观察；否则已落终态并返回记录。
+   */
+  const runSessionCheck = async (cause: "idle_silence" | "max_duration"): Promise<TaskRecord | null> => {
+    if (finished) return null;
+    if (!sessionId) {
+      // 会话尚未创建（兜底在派发阶段触发）：无会话可查，直接按总时长兜底落终态
+      return cause === "max_duration" ? finalize("timeout", `timeout after ${maxDurationMs}ms`) : null;
+    }
+    trackEvent("session_check", { cause, sessionId });
+    const checkAc = new AbortController();
+    let state: SessionState = "error";
+    let httpStatus: number | undefined;
+    let sessionJson: Record<string, unknown> | undefined;
+    try {
+      const res = await fetch(`${baseUrl}/session/${sessionId}`, { headers, signal: checkAc.signal });
+      httpStatus = res.status;
+      if (res.ok) {
+        sessionJson = (await res.json()) as Record<string, unknown>;
+        state = parseSessionState(sessionJson);
+      } else {
+        state = res.status === 404 ? "missing" : "error";
+      }
+    } catch {
+      state = "error"; // 网络失败按「报错」分支处理，产出探测兜底
+    }
+    if (cause === "idle_silence" && maxFired) return null; // 核查期间总时长兜底已触发，交由 max 流程结算
+
+    if (state === "idle") {
+      // idle 事件在断线窗口丢失：补走正常结算
+      trackEvent("session_settled", { cause, sessionId });
+      return await settleSuccess(sessionJson);
+    }
+    if (state === "missing" || state === "error") {
+      const hasOutput = probeWorkspaceOutput(opts.cwd);
+      trackEvent("output_detected", { hasOutput, state, httpStatus: httpStatus ?? null });
+      const detail =
+        state === "missing"
+          ? `会话不存在（GET /session/${sessionId} → HTTP ${httpStatus}）`
+          : `会话核查失败（GET /session/${sessionId} → ${httpStatus ? `HTTP ${httpStatus}` : "连接失败"}）`;
+      const reason = hasOutput ? `${detail}；工作区有未提交产出，建议核查而非重派` : detail;
+      return finalize("failed", reason, { hasOutput });
+    }
+    // running / unknown：会话仍存活
+    consecutiveRunningChecks += 1;
+    trackEvent("session_still_running", { cause, consecutive: consecutiveRunningChecks });
+    if (cause === "max_duration") {
+      const hasOutput = probeWorkspaceOutput(opts.cwd);
+      trackEvent("output_detected", { hasOutput });
+      return finalize("timeout", `timeout after ${maxDurationMs}ms`, { hasOutput });
+    }
+    if (consecutiveRunningChecks >= sessionCheckMaxRetries && !stallAlerted) {
+      stallAlerted = true;
+      sendStallAlert(
+        opts.notifyCommand,
+        base.id,
+        sessionId,
+        `SSE 静默 ${idleTimeoutMs}ms，连续 ${consecutiveRunningChecks} 次会话核查仍 running，请人工介入`,
+      );
+    }
+    return null; // 重挂 SSE（Last-Event-ID 续传 + /message 补拉）继续观察
   };
 
   try {
@@ -572,7 +829,26 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
 
     let reconnects = 0;
     let lastEventId: string | undefined;
-    while (!settled && !timedOut) {
+    armIdle();
+    while (!settled && !maxFired) {
+      // 核查分流：idle/兜底定时器置位的核查请求统一在循环顶部消费
+      if (checkCause === "max_duration") {
+        const rec = await runSessionCheck("max_duration");
+        if (rec) return rec;
+        break;
+      }
+      if (checkCause === "idle_silence") {
+        checkCause = null;
+        const rec = await runSessionCheck("idle_silence");
+        if (rec) return rec;
+        if (maxFired || settled || finished) break;
+        // 会话仍存活：重挂 SSE（Last-Event-ID 续传 + /message 补拉）继续观察
+        reconnects = 0;
+        streamAc = new AbortController();
+        await backfill().catch(() => {});
+        armIdle();
+        continue;
+      }
       try {
         const res = await fetch(`${baseUrl}/event`, {
           headers: {
@@ -589,14 +865,14 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
           handleData(data);
         });
       } catch (err) {
-        if (settled || timedOut) break;
-        if (streamAc.signal.aborted) break;
+        if (settled || finished) break;
         if (ac.signal.aborted) break;
         if (err instanceof HttpError && [401, 403, 404].includes(err.status)) {
           return finalize("failed", `SSE 订阅失败: ${err.message}`);
         }
       }
-      if (settled || timedOut) break;
+      if (settled || finished) break;
+      if (checkCause) continue;
       reconnects += 1;
       if (reconnects > MAX_SSE_RECONNECT) {
         return finalize("failed", "SSE 重连次数超限");
@@ -606,35 +882,21 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
       await sleep(delay, ac.signal).catch(() => {});
     }
 
-    if (timedOut) {
-      return finalize("failed", `timeout after ${opts.timeoutMs}ms`);
+    if (settled && !finished) return await settleSuccess();
+    if (maxFired && !finished) {
+      const rec = await runSessionCheck("max_duration");
+      if (rec) return rec;
     }
-    if (settled) {
-      let usage: ReturnType<typeof extractUsage> = {};
-      try {
-        const res = await fetch(`${baseUrl}/session/${sessionId}`, { headers, signal: ac.signal });
-        if (res.ok) usage = extractUsage((await res.json()) as Record<string, unknown>);
-      } catch {
-        // 结算读不到 session 数据不阻断终态写入
-      }
-      if (permissionPending && !failReason) {
-        const pending = permissionPending as { id?: string; title?: string };
-        failReason = `permission.asked 未响应: ${pending.title ?? pending.id ?? "unknown"}`;
-      }
-      const extra: Partial<TaskRecord> = {
-        ...usage,
-        ...(usage.cost != null ? { costTotal: usage.cost } : {}),
-        ...(usage.tokensInput != null ? { costInputTokens: usage.tokensInput } : {}),
-        ...(usage.tokensOutput != null ? { costOutputTokens: usage.tokensOutput } : {}),
-        ...(usage.tokensReasoning != null ? { costReasoningTokens: usage.tokensReasoning } : {}),
-        ...(usage.tokensCacheRead != null ? { costCacheReadTokens: usage.tokensCacheRead } : {}),
-      };
-      return finalize(failReason ? "failed" : "success", undefined, extra);
-    }
-    return finalize("failed", "SSE 连接中断且任务未结算");
+    if (!finished) return finalize("failed", "SSE 连接中断且任务未结算");
+    return { ...base, status: "running" };
   } catch (err) {
     if ((err as Error).name === "AbortError" || ac.signal.aborted) {
-      return finalize(timedOut ? "failed" : "failed", timedOut ? `timeout after ${opts.timeoutMs}ms` : "aborted");
+      if (maxFired) {
+        const rec = await runSessionCheck("max_duration");
+        if (rec) return rec;
+        return finalize("timeout", `timeout after ${maxDurationMs}ms`);
+      }
+      return finalize("failed", "aborted");
     }
     return finalize("failed", (err as Error).message);
   }

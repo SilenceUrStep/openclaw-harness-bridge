@@ -30,6 +30,8 @@ export interface DshRunOptions {
   tasksDir: string;
   notifyCommand?: string;
   fallbackUsed?: boolean;
+  /** v0.4.3 后台任务终态回调（重试/降级编排用）；wait=true 不触发 */
+  onFinal?: (rec: TaskRecord) => void;
 }
 
 interface RpcMessage {
@@ -317,7 +319,15 @@ export async function runDshTask(opts: DshRunOptions): Promise<TaskRecord> {
   opts.ledger.append(base);
   const exec = executeDshTask(opts, base);
   if (opts.wait) return exec;
-  exec.catch(() => {});
+  exec
+    .then((rec) => {
+      try {
+        opts.onFinal?.(rec);
+      } catch {
+        // 编排回调失败不影响台账
+      }
+    })
+    .catch(() => {}); // 失败已在 executeDshTask 内部落台账，防止 unhandled rejection
   return { ...base };
 }
 

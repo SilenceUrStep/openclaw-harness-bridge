@@ -12,12 +12,10 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import {
   PKG_ROOT,
-  checkHealth,
   expandHome,
   getAdapter,
   listAdapters,
   resolveDataDir,
-  type Adapter,
   type BridgeConfig,
 } from "./lib/adapters.js";
 import { Ledger, openLedgerAt, summarizeCost, type LedgerEvent, type TaskRecord } from "./lib/ledger.js";
@@ -25,9 +23,7 @@ import { extractSessionId, fillTemplate, runTask } from "./lib/runner.js";
 import { runHttpTask } from "./lib/runner-http.js";
 import { runDshTask } from "./lib/runner-dsh.js";
 import {
-  checkVersionGate,
   cliFallbackOf,
-  fetchHttpVersion,
   probeHttpHealth,
   resolveTransport,
   type HttpTransport,
@@ -40,6 +36,16 @@ import { appendStatusLine, buildStatusLine } from "./lib/statusline.js";
 import { buildTurnContext } from "./lib/turnprepare.js";
 import { MetricsSampler } from "./lib/metrics.js";
 import { registerDispatch, bindTaskId, removeEntry, pruneFinished } from "./lib/taskboard-auto.js";
+import { resolvePolicy, resolveRoute } from "./lib/routing.js";
+import {
+  orchestrate,
+  type DispatchMeta,
+  type DispatchResult,
+  type OrchestrationOutcome,
+} from "./lib/resilience.js";
+import { probeAllAdapters, probeAvailability } from "./lib/health.js";
+import { HealthWatchdog } from "./lib/watchdog.js";
+import { startupVersionCheck, type HostVersionApi } from "./lib/selfcheck.js";
 
 /** v0.4.1 进程内观测采样器（模块级单例，register 时启动） */
 const metricsSampler = new MetricsSampler();
@@ -97,6 +103,59 @@ const configSchema = Type.Object({
       description: "v0.4.1 task_event 事件流水保留天数，默认 30，0 表示不清理",
     }),
   ),
+  routing: Type.Optional(
+    Type.Object({
+      default: Type.Optional(
+        Type.String({ description: "v0.4.3 默认 harness（未显式指定且 taskType 无匹配时使用）" }),
+      ),
+      rules: Type.Optional(
+        Type.Array(
+          Type.Object({
+            taskType: Type.String({ description: "任务类型，如 coding/general/analysis/search" }),
+            harness: Type.String({ description: "目标 adapter id" }),
+            fallback: Type.Optional(
+              Type.Array(Type.String(), { description: "规则级降级链（覆盖 routing.fallback 同名项）" }),
+            ),
+          }),
+          { description: "v0.4.3 taskType → harness 路由规则覆盖（优先于 capabilities 匹配）" },
+        ),
+      ),
+      fallback: Type.Optional(
+        Type.Record(Type.String(), Type.Array(Type.String()), {
+          description: "v0.4.3 harness → 降级链（重试耗尽且 harness 不可用时依次接管）",
+        }),
+      ),
+      retryAttempts: Type.Optional(
+        Type.Number({ description: "v0.4.3 失败后同 harness 自动重试次数，默认 1，0 关闭" }),
+      ),
+    }),
+  ),
+  healthWatchdog: Type.Optional(
+    Type.Object({
+      enabled: Type.Optional(Type.Boolean({ description: "v0.4.3 定时探活开关，默认开启" })),
+      intervalMs: Type.Optional(
+        Type.Number({ description: "v0.4.3 探活间隔毫秒，默认 300000（5 分钟）" }),
+      ),
+    }),
+  ),
+  timeouts: Type.Optional(
+    Type.Object({
+      idleTimeoutMs: Type.Optional(
+        Type.Number({
+          description: "http 任务 SSE 流静默核查阈值毫秒，默认 300000（5 分钟），0=禁用静默核查",
+        }),
+      ),
+      maxDurationMs: Type.Optional(
+        Type.Number({
+          description:
+            "http 任务总时长兜底毫秒，默认 7200000（2 小时）；触发后核查会话状态而非直接判失败；旧 timeoutMs 参数继续兼容",
+        }),
+      ),
+      sessionCheckMaxRetries: Type.Optional(
+        Type.Number({ description: "连续会话核查仍 running 的告警阈值次数，默认 3" }),
+      ),
+    }),
+  ),
 });
 
 function paramDictFile(cfg: BridgeConfig): string {
@@ -134,8 +193,10 @@ function runResponse(rec: TaskRecord, wait: boolean): Record<string, unknown> {
       error: rec.error ?? null,
       ...(rec.transport ? { transport: rec.transport } : {}),
       ...(rec.fallbackUsed ? { fallbackUsed: true } : {}),
+      ...(rec.retryOf ? { retryOf: rec.retryOf } : {}),
       ...(rec.failReason ? { failReason: rec.failReason } : {}),
       ...(rec.forkedFrom ? { forkedFrom: rec.forkedFrom } : {}),
+      ...(rec.hasOutput != null ? { hasOutput: rec.hasOutput } : {}),
       ...(rec.cost != null ? { cost: rec.cost } : {}),
       ...(rec.costTotal != null ? { costTotal: rec.costTotal } : {}),
       ...(rec.costInputTokens != null ? { costInputTokens: rec.costInputTokens } : {}),
@@ -175,60 +236,11 @@ const toolEntry = defineToolPlugin({
       name: "harness_list",
       label: "Harness List",
       description:
-        "列出已注册的编码 harness（声明式 adapter）及健康状态：二进制是否安装、版本、模型配置文件存在性；http 型 adapter 额外做 transport 探活（超时 3s）。",
+        "列出已注册的编码 harness（声明式 adapter）及健康状态：二进制是否安装、版本、模型配置文件存在性；http 型 adapter 额外做 transport 探活（超时 3s）；binary 不可用时附诊断线索（PATH/悬空符号链接/候选路径，v0.4.3）。",
       parameters: Type.Object({}),
       execute: async (_params, config) => {
         const cfg = config as BridgeConfig;
-        return Promise.all(
-          listAdapters(cfg).map(async (a) => {
-            const t = resolveTransport(a);
-            const base = {
-              id: a.id,
-              displayName: a.displayName,
-              description: a.description ?? null,
-              binary: a.binary,
-              modelSync: Boolean(a.config?.modelConfig),
-              schemaVersion: a.schemaVersion ?? 1,
-              ...checkHealth(a),
-            };
-            if (t.kind === "http") {
-              const probe = await probeHttpHealth(t.config as HttpTransport);
-              let gate = checkVersionGate(undefined, a.versionGate ?? {});
-              if (a.versionGate && probe.ok) {
-                const v = await fetchHttpVersion(t.config as HttpTransport);
-                gate = checkVersionGate(v, a.versionGate);
-              }
-              return {
-                ...base,
-                transport: "http",
-                healthy: probe.ok && gate.ok,
-                healthDetail: !probe.ok
-                  ? (probe.error ?? `HTTP ${probe.status}`)
-                  : gate.ok
-                    ? `HTTP ${probe.status}，版本 ${gate.version ?? "未知"}`
-                    : gate.detail,
-                cliFallback: cliFallbackOf(a),
-                versionGate: a.versionGate ?? null,
-              };
-            }
-            if (t.kind === "stdio-rpc") {
-              const h = checkHealth(a);
-              const gate = checkVersionGate(h.version, a.versionGate ?? {});
-              return {
-                ...base,
-                transport: "stdio-rpc",
-                healthy: h.installed && gate.ok,
-                healthDetail: !h.installed
-                  ? "binary 不可用"
-                  : gate.ok
-                    ? `版本 ${gate.version ?? "未知"}（SDK 就绪，运行时握手复核）`
-                    : gate.detail,
-                versionGate: a.versionGate ?? null,
-              };
-            }
-            return { ...base, transport: "cli", healthy: base.installed };
-          }),
-        );
+        return probeAllAdapters(cfg);
       },
     }),
 
@@ -288,9 +300,14 @@ const toolEntry = defineToolPlugin({
       name: "harness_run",
       label: "Harness Run",
       description:
-        "把编码任务委派给指定 harness。默认后台执行（台账记录，完成后可用 harness_status 查询）；wait=true 同步等待并返回输出尾部。",
+        "把编码任务委派给指定 harness。默认后台执行（台账记录，完成后可用 harness_status 查询）；wait=true 同步等待并返回输出尾部。v0.4.3：harness 可省略，按 taskType 的 capabilities 路由或 routing.default 兜底；失败自动重试（默认 1 次）+ harness 不可用时按降级链接管，全程记事件台账。",
       parameters: Type.Object({
-        harness: Type.String({ description: "adapter id，见 harness_list" }),
+        harness: Type.Optional(
+          Type.String({ description: "adapter id（见 harness_list）；省略时按 taskType/路由配置选择" }),
+        ),
+        taskType: Type.Optional(
+          Type.String({ description: "v0.4.3 任务类型（如 coding/general/analysis/search），按 capabilities 路由" }),
+        ),
         prompt: Type.String({ description: "任务指令全文" }),
         resumeSessionId: Type.Optional(
           Type.String({ description: "续接会话 ID（adapter 需支持 resume）" }),
@@ -311,21 +328,24 @@ const toolEntry = defineToolPlugin({
       }),
       execute: async (params, config) => {
         const cfg = config as BridgeConfig;
-        const adapter = getAdapter(cfg, params.harness);
-        if (!adapter) {
-          const known = listAdapters(cfg)
-            .map((a) => a.id)
-            .join(", ");
-          return { error: `未知 harness: ${params.harness}（可用: ${known}）` };
+        const adapters = listAdapters(cfg);
+        const route = resolveRoute(cfg, adapters, {
+          harness: params.harness,
+          taskType: params.taskType,
+        });
+        if ("error" in route) return { error: route.error };
+        const target = adapters.find((a) => a.id === route.harness);
+        if (!target) {
+          const known = adapters.map((a) => a.id).join(", ");
+          return { error: `未知 harness: ${route.harness}（可用: ${known}）` };
         }
         const dataDir = resolveDataDir(cfg);
         const tasksDir = path.join(dataDir, "tasks");
         mkdirSync(tasksDir, { recursive: true });
         const ledger = openLedger(cfg);
         const wait = params.wait === true;
-        const timeoutMs =
-          params.timeoutMs ?? adapter.delegate.timeoutMs ?? cfg.defaultTimeoutMs ?? 600000;
 
+        // manual retryOf（fork-before-retry）保持 0.4.2 语义：仅首次派发生效
         let forkFromSessionId: string | undefined;
         let cliResumeSessionId = params.resumeSessionId;
         if (params.retryOf) {
@@ -338,96 +358,140 @@ const toolEntry = defineToolPlugin({
           forkFromSessionId = old.sessionId;
         }
 
-        const transport = resolveTransport(adapter);
-        if (transport.kind === "stdio-rpc") {
-          const rec = await runDshTask({
+        const policy = resolvePolicy(cfg, route);
+        let onFinalHandler: ((rec: TaskRecord) => void) | undefined;
+        const onFinalRef = wait ? undefined : (rec: TaskRecord) => onFinalHandler?.(rec);
+        const dispatch = async (harnessId: string, meta: DispatchMeta): Promise<DispatchResult> => {
+          const adapter = harnessId === route.harness ? target : adapters.find((a) => a.id === harnessId);
+          if (!adapter) return { ok: false, error: `路由目标 harness 未注册: ${harnessId}` };
+          const timeoutMs =
+            params.timeoutMs ?? adapter.delegate.timeoutMs ?? cfg.defaultTimeoutMs ?? 600000;
+          // http 任务两级判定：显式 params.timeoutMs > timeouts.maxDurationMs > 2h 缺省
+          // （delegate.timeoutMs 的总时长一刀切语义对 http 退役，仅 cli/dsh 沿用）
+          const maxDurationMs = params.timeoutMs ?? cfg.timeouts?.maxDurationMs ?? 7200000;
+          const transport = resolveTransport(adapter);
+          const runCommon = {
             adapter,
-            transport: (transport.config ?? { type: "stdio-rpc", command: adapter.binary }) as StdioRpcTransport,
             prompt: params.prompt,
             cwd: params.cwd ?? dataDir,
-            dshHome: path.join(dataDir, "dsh-home"),
             wait,
             timeoutMs,
             ledger,
             tasksDir,
             notifyCommand: cfg.notifyCommand,
-          });
-          return runResponse(rec, wait);
-        }
-
-        if (transport.kind === "http") {
-          const ht = transport.config as HttpTransport;
-          const probe = await probeHttpHealth(ht, { cwd: params.cwd ?? dataDir });
-          if (!probe.ok && cliFallbackOf(adapter)) {
-            const rec = runTask({
-              adapter,
-              prompt: params.prompt,
-              resumeSessionId: cliResumeSessionId,
-              cwd: params.cwd ?? dataDir,
-              wait,
-              timeoutMs,
-              ledger,
-              tasksDir,
-              notifyCommand: cfg.notifyCommand,
+            ...(onFinalRef ? { onFinal: onFinalRef } : {}),
+          };
+          if (transport.kind === "stdio-rpc") {
+            const rec = await runDshTask({
+              ...runCommon,
+              transport: (transport.config ?? {
+                type: "stdio-rpc",
+                command: adapter.binary,
+              }) as StdioRpcTransport,
+              dshHome: path.join(dataDir, "dsh-home"),
             });
-            ledger.append({ ...rec, transport: "cli", fallbackUsed: true });
-            return runResponse(rec, wait);
+            return { ok: true, rec };
           }
-          if (!probe.ok) {
-            return {
-              error: `http 探活失败: ${probe.error ?? `HTTP ${probe.status}`}，adapter 未配置 fallback，任务未执行`,
-            };
+          if (transport.kind === "http") {
+            const ht = transport.config as HttpTransport;
+            const probe = await probeHttpHealth(ht, { cwd: params.cwd ?? dataDir });
+            if (!probe.ok && cliFallbackOf(adapter)) {
+              const rec = runTask({ ...runCommon, resumeSessionId: cliResumeSessionId });
+              ledger.append({ ...rec, transport: "cli", fallbackUsed: true });
+              return { ok: true, rec: { ...rec, transport: "cli", fallbackUsed: true } };
+            }
+            if (!probe.ok) {
+              return {
+                ok: false,
+                error: `http 探活失败: ${probe.error ?? `HTTP ${probe.status}`}，adapter 未配置 fallback，任务未执行`,
+              };
+            }
+            const rec = await runHttpTask({
+              ...runCommon,
+              transport: ht,
+              resumeSessionId: cliResumeSessionId,
+              forkFromSessionId: meta.isInitial ? forkFromSessionId : undefined,
+              maxDurationMs,
+              idleTimeoutMs: cfg.timeouts?.idleTimeoutMs,
+              sessionCheckMaxRetries: cfg.timeouts?.sessionCheckMaxRetries,
+            });
+            return { ok: true, rec };
           }
-          const rec = await runHttpTask({
-            adapter,
-            transport: ht,
-            prompt: params.prompt,
-            resumeSessionId: cliResumeSessionId,
-            forkFromSessionId,
-            cwd: params.cwd ?? dataDir,
-            wait,
-            timeoutMs,
+          // cli：fork-before-retry 走 delegate.fork argv 模板，输出按 idPattern 提取新会话（仅首次派发）
+          let effectiveResume = cliResumeSessionId;
+          if (meta.isInitial && forkFromSessionId) {
+            const forkTpl = adapter.delegate.fork;
+            if (!Array.isArray(forkTpl) || forkTpl.length === 0) {
+              return {
+                ok: false,
+                fatal: true,
+                error: "adapter 未配置 delegate.fork（argv 模板），cli 模式不支持 fork-before-retry",
+              };
+            }
+            const forkArgv = fillTemplate(forkTpl, { sessionId: forkFromSessionId, prompt: params.prompt });
+            const fr = spawnSync(forkArgv[0], forkArgv.slice(1), {
+              cwd: params.cwd ?? dataDir,
+              timeout: 30000,
+              encoding: "utf8",
+            });
+            const forked = extractSessionId(
+              `${fr.stdout ?? ""}${fr.stderr ?? ""}`,
+              adapter.session?.idPattern,
+            );
+            if (!forked) {
+              return { ok: false, fatal: true, error: `fork 命令未产出新会话 ID（exit=${fr.status}）` };
+            }
+            effectiveResume = forked;
+          }
+          const rec = runTask({ ...runCommon, resumeSessionId: effectiveResume });
+          return { ok: true, rec };
+        };
+
+        // v0.4.3 兼容门控：未配置 routing（不重试不降级）时单次派发，行为与 0.4.2 完全一致
+        const orchestrationActive = policy.retryAttempts > 0 || policy.fallbackChain.length > 0;
+        let outcome: OrchestrationOutcome;
+        if (orchestrationActive) {
+          outcome = await orchestrate({
             ledger,
-            tasksDir,
-            notifyCommand: cfg.notifyCommand,
+            wait,
+            initialHarness: route.harness,
+            retryAttempts: policy.retryAttempts,
+            fallbackChain: policy.fallbackChain,
+            probe: (hid) => probeAvailability(cfg, hid),
+            dispatch,
+            ...(wait ? {} : { setOnFinal: (fn: (rec: TaskRecord) => void) => { onFinalHandler = fn; } }),
           });
-          return runResponse(rec, wait);
-        }
-
-        // cli：fork-before-retry 走 delegate.fork argv 模板，输出按 idPattern 提取新会话
-        if (forkFromSessionId) {
-          const forkTpl = adapter.delegate.fork;
-          if (!Array.isArray(forkTpl) || forkTpl.length === 0) {
-            return { error: "adapter 未配置 delegate.fork（argv 模板），cli 模式不支持 fork-before-retry" };
-          }
-          const forkArgv = fillTemplate(forkTpl, { sessionId: forkFromSessionId, prompt: params.prompt });
-          const fr = spawnSync(forkArgv[0], forkArgv.slice(1), {
-            cwd: params.cwd ?? dataDir,
-            timeout: 30000,
-            encoding: "utf8",
-          });
-          const forked = extractSessionId(
-            `${fr.stdout ?? ""}${fr.stderr ?? ""}`,
-            adapter.session?.idPattern,
+        } else {
+          const res = await dispatch(route.harness, { isInitial: true }).catch(
+            (err): DispatchResult => ({ ok: false, error: (err as Error).message }),
           );
-          if (!forked) {
-            return { error: `fork 命令未产出新会话 ID（exit=${fr.status}）` };
-          }
-          cliResumeSessionId = forked;
+          outcome = res.ok
+            ? { rec: res.rec, attempts: 1, fallbackUsed: false, retryOfChain: [] }
+            : { rec: null, error: res.error, attempts: 1, fallbackUsed: false, retryOfChain: [] };
         }
 
-        const rec = runTask({
-          adapter,
-          prompt: params.prompt,
-          resumeSessionId: cliResumeSessionId,
-          cwd: params.cwd ?? dataDir,
-          wait,
-          timeoutMs,
-          ledger,
-          tasksDir,
-          notifyCommand: cfg.notifyCommand,
-        });
-        return runResponse(rec, wait);
+        // 路由决策入事件台账（挂首个任务记录：选了谁、为什么）
+        if (outcome.rec) {
+          try {
+            ledger.addEvents(outcome.rec.id, [
+              {
+                type: "route",
+                payload: {
+                  decision: { harness: route.harness, reason: route.reason, detail: route.detail },
+                  taskType: params.taskType ?? null,
+                  policy,
+                  fallbackUsed: outcome.fallbackUsed,
+                  retryOfChain: outcome.retryOfChain,
+                },
+                ts: new Date().toISOString(),
+              },
+            ]);
+          } catch {
+            // 事件写入失败不影响响应
+          }
+          return runResponse(outcome.rec, wait);
+        }
+        return { error: outcome.error ?? "任务派发失败" };
       },
     }),
 
@@ -565,9 +629,13 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
     const dataDir = resolveDataDir(cfg);
     const ledgerDbPath = path.join(dataDir, "ledger.db");
     const ledgerLegacyFile = path.join(dataDir, "ledger.jsonl");
+    /** v0.4.3 自检用：已注册 hook 名单（按实际注册顺序记录） */
+    const activeHooks: string[] = [];
+    let watchdog: HealthWatchdog | null = null;
 
     // v0.4 状态行钩子：出站消息强制追加「后台任务」状态行
     if (cfg.statusLineEnabled !== false) {
+      activeHooks.push("message_sending");
       api.on("message_sending", async (event) => {
         try {
           const line = buildStatusLine({
@@ -586,6 +654,7 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
 
     // v0.4.1 透明度补全：每回合注入后台任务清单（无任务零注入）
     if (cfg.turnPrepareEnabled !== false) {
+      activeHooks.push("agent_turn_prepare");
       api.on("agent_turn_prepare", async () => {
         try {
           const ctx = buildTurnContext({
@@ -623,6 +692,7 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
 
     // v0.4.2 自动登记：harness_run 派发自动写 taskboard「🤖 自动登记」段，治承诺悬空
     if (cfg.turnPrepareEnabled !== false && cfg.taskboardFile) {
+      activeHooks.push("before_tool_call", "after_tool_call");
       const tbFile = cfg.taskboardFile as string;
       api.on("before_tool_call", async (event) => {
         try {
@@ -653,6 +723,36 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
       });
     }
 
+    // v0.4.3 宿主版本感知 + 升级自检（异步，不阻塞注册）
+    try {
+      void startupVersionCheck({
+        cfg,
+        ledger: openLedger(cfg),
+        hooks: [...activeHooks],
+        dataDir,
+        api: api as unknown as HostVersionApi,
+      }).catch(() => {
+        // 自检失败不影响主功能
+      });
+    } catch {
+      // ignore
+    }
+
+    // v0.4.3 定时探活 + 状态变化告警（默认开启，间隔 5 分钟）
+    if (cfg.healthWatchdog?.enabled !== false) {
+      try {
+        watchdog = new HealthWatchdog({
+          cfg,
+          intervalMs: cfg.healthWatchdog?.intervalMs ?? 300_000,
+          ledger: openLedger(cfg),
+          notifyCommand: cfg.notifyCommand,
+        });
+        watchdog.start();
+      } catch {
+        // 探活启动失败不影响主功能
+      }
+    }
+
     // v0.4.1 台账自动清理：task_event 保留 N 天（默认 30，0=不清理）
     const retentionDays = cfg.eventRetentionDays ?? 30;
     if (retentionDays > 0) {
@@ -674,6 +774,12 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
 
     // 网关停止时释放采样器与定时器（v0.4.2：停止前 flush 观测数据）
     api.on("gateway_stop", async () => {
+      try {
+        watchdog?.stop();
+        watchdog = null;
+      } catch {
+        // ignore
+      }
       try {
         metricsSampler.saveToDisk(path.join(dataDir, "metrics.json"));
       } catch {

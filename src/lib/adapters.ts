@@ -65,6 +65,8 @@ export interface Adapter {
   displayName: string;
   description?: string;
   binary: string;
+  /** v0.4.3 能力路由：本 adapter 擅长的任务类型（如 coding/general/analysis/search） */
+  capabilities?: string[];
   /** adapter schema 版本；v1 文件无此字段 = 缺省 1（无 transport 字段即 cli 模式） */
   schemaVersion?: number;
   /** 版本门禁（http / stdio-rpc transport 通用）：越界显性拒绝执行 */
@@ -84,12 +86,55 @@ export interface Adapter {
   session?: { idPattern?: string };
 }
 
+/** v0.4.3 路由规则：taskType → harness 覆盖（优先级高于 capabilities 匹配） */
+export interface RoutingRule {
+  taskType: string;
+  harness: string;
+  /** 规则级降级链（覆盖 routing.fallback 中该 harness 的配置） */
+  fallback?: string[];
+}
+
+/** v0.4.3 能力路由配置段 */
+export interface RoutingConfig {
+  /** 默认 harness（未显式指定且 taskType 无匹配时使用） */
+  default?: string;
+  /** taskType → harness 路由规则覆盖 */
+  rules?: RoutingRule[];
+  /** harness → 降级链（重试耗尽且 harness 不可用时依次尝试） */
+  fallback?: Record<string, string[]>;
+  /** 任务失败后同 harness 自动重试次数，默认 1，0 关闭 */
+  retryAttempts?: number;
+}
+
+/** v0.4.3 定时探活配置段 */
+export interface WatchdogConfig {
+  enabled?: boolean;
+  /** 探活间隔毫秒，默认 300000（5 分钟） */
+  intervalMs?: number;
+}
+
+/** http 任务超时两级判定配置段（SSE 静默核查 + 总时长兜底） */
+export interface RunTimeoutsConfig {
+  /** SSE 流静默核查阈值毫秒，默认 300000（5 分钟），0=禁用静默核查 */
+  idleTimeoutMs?: number;
+  /** 总时长兜底毫秒，默认 7200000（2 小时），0=禁用兜底；替代旧 delegate.timeoutMs 一刀切语义 */
+  maxDurationMs?: number;
+  /** 连续会话核查仍 running 的告警阈值次数，默认 3 */
+  sessionCheckMaxRetries?: number;
+}
+
 export interface BridgeConfig {
   dataDir?: string;
   adaptersDir?: string;
   paramsFile?: string;
   notifyCommand?: string;
   defaultTimeoutMs?: number;
+  /** v0.4.3 能力路由 + 重试降级（不配置则行为与 0.4.2 一致） */
+  routing?: RoutingConfig;
+  /** v0.4.3 定时探活 + 状态变化告警（默认开启，间隔 5 分钟） */
+  healthWatchdog?: WatchdogConfig;
+  /** http 任务超时两级判定（idleTimeoutMs/maxDurationMs/sessionCheckMaxRetries） */
+  timeouts?: RunTimeoutsConfig;
 }
 
 export function expandHome(p: string): string {

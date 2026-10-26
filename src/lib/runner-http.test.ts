@@ -1,6 +1,7 @@
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -11,6 +12,8 @@ import {
   mapEnvelope,
   mapPart,
   parseSseBlock,
+  parseSessionState,
+  probeWorkspaceOutput,
   runHttpTask,
   truncateText,
   type HttpRunOptions,
@@ -456,16 +459,24 @@ describe("runner-http: 任务执行（mock opencode server）", () => {
     }
   });
 
-  it("任务级超时 → 取消并记 failed（fail_reason=timeout）", async () => {
+  it("任务级超时 → 会话核查后落 timeout（legacy timeoutMs 映射兜底，不直接判 failed）", async () => {
     const mock = new MockOpencode();
     mock.onPrompt = async (sid) => {
       mock.emit({ type: "session.status", properties: { status: { type: "busy" } } }, sid);
     };
     await mock.start();
     try {
-      const rec = await runHttpTask(makeOpts(mock, { timeoutMs: 400 }));
-      expect(rec.status).toBe("failed");
+      const opts = makeOpts(mock, { timeoutMs: 400 });
+      const rec = await runHttpTask(opts);
+      expect(rec.status).toBe("timeout");
       expect(rec.failReason).toBe("timeout after 400ms");
+      expect(rec.hasOutput).toBe(false);
+      // 兜底触发的是会话核查流程而非直接 abort：mock 会话存在且无状态字段 → 保守按 running
+      expect(mock.requests.some((r) => r.method === "GET" && r.url === "/session/ses_mock1")).toBe(true);
+      const types = opts.ledger.getEvents(rec.id).map((e) => e.type);
+      expect(types).toContain("session_check");
+      expect(types).toContain("session_still_running");
+      expect(types).toContain("output_detected");
     } finally {
       await mock.stop();
     }
@@ -606,4 +617,261 @@ describe("runner-http: 任务执行（mock opencode server）", () => {
       await mock.stop();
     }
   }, 10000);
+});
+
+describe("runner-http: 超时两级判定（idle 核查 / 会话核查 / 产出探测）", () => {
+  it("parseSessionState 兼容 status 字符串/对象/time.finished/unknown", () => {
+    expect(parseSessionState({ status: "busy" })).toBe("running");
+    expect(parseSessionState({ status: "active" })).toBe("running");
+    expect(parseSessionState({ status: { type: "retry" } })).toBe("running");
+    expect(parseSessionState({ status: { type: "idle" } })).toBe("idle");
+    expect(parseSessionState({ status: "completed" })).toBe("idle");
+    expect(parseSessionState({ status: { type: "error" } })).toBe("error");
+    expect(parseSessionState({ time: { finished: "2026-10-26T00:00:00Z" } })).toBe("idle");
+    expect(parseSessionState({})).toBe("unknown");
+    expect(parseSessionState({ status: "weird" })).toBe("unknown");
+    expect(parseSessionState(null)).toBe("unknown");
+    expect(parseSessionState(undefined)).toBe("unknown");
+  });
+
+  it("probeWorkspaceOutput：git 有改动=true；干净仓库/非 git/无 cwd=false", () => {
+    const dirty = mkdtempSync(path.join(tmpdir(), "hb-git-dirty-"));
+    dirs.push(dirty);
+    execSync("git init", { cwd: dirty, stdio: "ignore" });
+    writeFileSync(path.join(dirty, "wip.txt"), "uncommitted");
+    expect(probeWorkspaceOutput(dirty)).toBe(true);
+
+    const clean = mkdtempSync(path.join(tmpdir(), "hb-git-clean-"));
+    dirs.push(clean);
+    execSync("git init", { cwd: clean, stdio: "ignore" });
+    execSync("git -c user.email=t@t -c user.name=t commit --allow-empty -m init", {
+      cwd: clean,
+      stdio: "ignore",
+    });
+    expect(probeWorkspaceOutput(clean)).toBe(false);
+
+    const nonGit = mkdtempSync(path.join(tmpdir(), "hb-nogit-"));
+    dirs.push(nonGit);
+    expect(probeWorkspaceOutput(nonGit)).toBe(false);
+    expect(probeWorkspaceOutput(undefined)).toBe(false);
+  });
+
+  it("流静默超阈值 → 会话核查 running → 重挂 SSE 继续观察 → 恢复后正常结算", async () => {
+    const mock = new MockOpencode();
+    let eventConnections = 0;
+    const origRoute = mock["route"].bind(mock) as (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+    (mock as unknown as { route: (req: IncomingMessage, res: ServerResponse) => Promise<void> }).route =
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", mock.baseUrl);
+        if (url.pathname === "/event") eventConnections += 1;
+        await origRoute(req, res);
+      };
+    mock.sessionInfo = { status: { type: "busy" } };
+    mock.onPrompt = async (sid) => {
+      mock.emit({ type: "session.status", properties: { status: { type: "busy" } } }, sid);
+      await mock.emitParts([part("p1", { type: "step-start" })], sid);
+      // 随后持续静默（核查期间会话一直 running）；重挂后由延迟送达的 idle 事件结算
+      setTimeout(() => {
+        mock.emit({ type: "session.status", properties: { status: { type: "idle" } } }, sid);
+      }, 400);
+    };
+    await mock.start();
+    try {
+      const opts = makeOpts(mock, { idleTimeoutMs: 100 });
+      const rec = await runHttpTask(opts);
+      expect(rec.status).toBe("success");
+      expect(eventConnections).toBeGreaterThanOrEqual(2); // 核查后重挂，未判死
+      const types = opts.ledger.getEvents(rec.id).map((e) => e.type);
+      expect(types).toContain("idle_triggered");
+      expect(types).toContain("session_check");
+      expect(types).toContain("session_still_running");
+    } finally {
+      await mock.stop();
+    }
+  }, 15000);
+
+  it("流静默核查发现已 idle（事件断线窗口丢失）→ 补结算 success", async () => {
+    const mock = new MockOpencode();
+    let eventConnections = 0;
+    const origRoute = mock["route"].bind(mock) as (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+    (mock as unknown as { route: (req: IncomingMessage, res: ServerResponse) => Promise<void> }).route =
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", mock.baseUrl);
+        if (url.pathname === "/event") eventConnections += 1;
+        await origRoute(req, res);
+      };
+    mock.sessionInfo = { status: { type: "idle" }, cost: 0.07, tokens: { input: 11, output: 22 } };
+    mock.onPrompt = async (sid) => {
+      mock.emit({ type: "session.status", properties: { status: { type: "busy" } } }, sid);
+      await mock.emitParts([part("p1", { type: "text", text: "lost-idle" })], sid);
+      // 不再发任何 SSE 事件（idle 事件断线窗口丢失）
+    };
+    await mock.start();
+    try {
+      const opts = makeOpts(mock, { idleTimeoutMs: 120 });
+      const rec = await runHttpTask(opts);
+      expect(rec.status).toBe("success");
+      expect(rec.outputTail).toBe("lost-idle");
+      expect(rec.cost).toBe(0.07);
+      expect(rec.costTotal).toBe(0.07);
+      expect(rec.tokensInput).toBe(11);
+      expect(rec.tokensOutput).toBe(22);
+      expect(eventConnections).toBe(1); // 无需重挂
+      const types = opts.ledger.getEvents(rec.id).map((e) => e.type);
+      expect(types).toContain("session_check");
+      expect(types).toContain("session_settled");
+      expect(types).not.toContain("session_still_running");
+      expect(opts.ledger.getById(rec.id)?.status).toBe("success");
+    } finally {
+      await mock.stop();
+    }
+  }, 15000);
+
+  it("核查发现会话不存在 + 工作区有未提交产出 → failed + hasOutput=true + 建议核查而非重派", async () => {
+    const repo = mkdtempSync(path.join(tmpdir(), "hb-repo-dirty-"));
+    dirs.push(repo);
+    execSync("git init", { cwd: repo, stdio: "ignore" });
+    writeFileSync(path.join(repo, "wip.txt"), "uncommitted");
+    const mock = new MockOpencode();
+    const origRoute = mock["route"].bind(mock) as (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+    (mock as unknown as { route: (req: IncomingMessage, res: ServerResponse) => Promise<void> }).route =
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", mock.baseUrl);
+        if (req.method === "GET" && /^\/session\/[^/]+$/.test(url.pathname)) {
+          res.writeHead(404);
+          res.end();
+          return;
+        }
+        await origRoute(req, res);
+      };
+    mock.onPrompt = async (sid) => {
+      mock.emit({ type: "session.status", properties: { status: { type: "busy" } } }, sid);
+    };
+    await mock.start();
+    try {
+      const opts = makeOpts(mock, { idleTimeoutMs: 100, cwd: repo });
+      const rec = await runHttpTask(opts);
+      expect(rec.status).toBe("failed");
+      expect(rec.hasOutput).toBe(true);
+      expect(rec.failReason).toContain("会话不存在");
+      expect(rec.failReason).toContain("建议核查而非重派");
+      const detected = opts.ledger.getEvents(rec.id).find((e) => e.type === "output_detected");
+      expect((detected!.payload as { hasOutput: boolean }).hasOutput).toBe(true);
+      expect(opts.ledger.getById(rec.id)?.hasOutput).toBe(true);
+    } finally {
+      await mock.stop();
+    }
+  }, 15000);
+
+  it("核查发现会话不存在 + 无产出（非 git cwd）→ failed + hasOutput=false", async () => {
+    const nonGit = mkdtempSync(path.join(tmpdir(), "hb-nogit-"));
+    dirs.push(nonGit);
+    const mock = new MockOpencode();
+    const origRoute = mock["route"].bind(mock) as (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+    (mock as unknown as { route: (req: IncomingMessage, res: ServerResponse) => Promise<void> }).route =
+      async (req, res) => {
+        const url = new URL(req.url ?? "/", mock.baseUrl);
+        if (req.method === "GET" && /^\/session\/[^/]+$/.test(url.pathname)) {
+          res.writeHead(404);
+          res.end();
+          return;
+        }
+        await origRoute(req, res);
+      };
+    mock.onPrompt = async (sid) => {
+      mock.emit({ type: "session.status", properties: { status: { type: "busy" } } }, sid);
+    };
+    await mock.start();
+    try {
+      const opts = makeOpts(mock, { idleTimeoutMs: 100, cwd: nonGit });
+      const rec = await runHttpTask(opts);
+      expect(rec.status).toBe("failed");
+      expect(rec.hasOutput).toBe(false);
+      expect(rec.failReason).not.toContain("建议核查而非重派");
+    } finally {
+      await mock.stop();
+    }
+  }, 15000);
+
+  it("连续核查仍 running 超阈值 → 告警人工介入且不判死，恢复后正常结算", async () => {
+    const adir = mkdtempSync(path.join(tmpdir(), "hb-alert-"));
+    dirs.push(adir);
+    const alertFile = path.join(adir, "alerts.txt");
+    const mock = new MockOpencode();
+    mock.sessionInfo = { status: { type: "busy" } };
+    mock.onPrompt = async (sid) => {
+      mock.emit({ type: "session.status", properties: { status: { type: "busy" } } }, sid);
+      setTimeout(() => {
+        mock.emit({ type: "session.status", properties: { status: { type: "idle" } } }, sid);
+      }, 600);
+    };
+    await mock.start();
+    try {
+      const opts = makeOpts(mock, {
+        idleTimeoutMs: 80,
+        sessionCheckMaxRetries: 2,
+        notifyCommand: `printf '%s|%s\\n' "$HB_ALERT" "$HB_TASK_ID" >> "${alertFile}"`,
+      });
+      const rec = await runHttpTask(opts);
+      expect(rec.status).toBe("success"); // 不自动杀，恢复后正常结算
+      const stillRunning = opts.ledger.getEvents(rec.id).filter((e) => e.type === "session_still_running");
+      expect(stillRunning.length).toBeGreaterThanOrEqual(2);
+      // 告警为异步 fire-and-forget，轮询等待送达
+      const deadline = Date.now() + 3000;
+      let content = "";
+      while (Date.now() < deadline) {
+        content = existsSync(alertFile) ? readFileSync(alertFile, "utf8") : "";
+        if (content.includes("task_stall")) break;
+        await delay(50);
+      }
+      expect(content).toContain("task_stall");
+      expect(content).toContain(rec.id);
+    } finally {
+      await mock.stop();
+    }
+  }, 15000);
+
+  it("总时长兜底触发核查：会话仍 running → timeout 终态（非一刀切 failed）", async () => {
+    const mock = new MockOpencode();
+    mock.sessionInfo = { status: { type: "busy" } };
+    mock.onPrompt = async (sid) => {
+      mock.emit({ type: "session.status", properties: { status: { type: "busy" } } }, sid);
+    };
+    await mock.start();
+    try {
+      const opts = makeOpts(mock, { idleTimeoutMs: 0, maxDurationMs: 250 });
+      const rec = await runHttpTask(opts);
+      expect(rec.status).toBe("timeout");
+      expect(rec.failReason).toBe("timeout after 250ms");
+      expect(rec.hasOutput).toBe(false); // 无 cwd → 视为无产出
+      const types = opts.ledger.getEvents(rec.id).map((e) => e.type);
+      expect(types).toContain("session_check");
+      expect(types).toContain("session_still_running");
+      expect(types).toContain("output_detected");
+      expect(types).not.toContain("idle_triggered"); // idleTimeoutMs=0 禁用 idle 检测
+      expect(mock.requests.some((r) => r.method === "GET" && r.url === "/session/ses_mock1")).toBe(true);
+    } finally {
+      await mock.stop();
+    }
+  }, 15000);
+
+  it("总时长兜底触发核查：会话已 idle → 正常结算 success", async () => {
+    const mock = new MockOpencode();
+    mock.sessionInfo = { status: { type: "idle" }, cost: 0.5, tokens: { input: 7, output: 9 } };
+    mock.onPrompt = async (sid) => {
+      mock.emit({ type: "session.status", properties: { status: { type: "busy" } } }, sid);
+    };
+    await mock.start();
+    try {
+      const opts = makeOpts(mock, { idleTimeoutMs: 0, maxDurationMs: 250 });
+      const rec = await runHttpTask(opts);
+      expect(rec.status).toBe("success");
+      expect(rec.cost).toBe(0.5);
+      expect(rec.tokensInput).toBe(7);
+      const settledEv = opts.ledger.getEvents(rec.id).find((e) => e.type === "session_settled");
+      expect((settledEv!.payload as { cause: string }).cause).toBe("max_duration");
+    } finally {
+      await mock.stop();
+    }
+  }, 15000);
 });

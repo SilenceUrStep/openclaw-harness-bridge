@@ -3,6 +3,7 @@ import { appendFileSync, closeSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { Adapter } from "./adapters.js";
 import type { Ledger, TaskRecord, TaskStatus } from "./ledger.js";
+import { classifyFailure, failureAdvice } from "./resilience.js";
 
 export function newTaskId(now: Date = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -48,6 +49,8 @@ export interface RunOptions {
   ledger: Ledger;
   tasksDir: string;
   notifyCommand?: string;
+  /** v0.4.3 后台任务终态回调（重试/降级编排用）；wait=true 不触发 */
+  onFinal?: (rec: TaskRecord) => void;
 }
 
 function buildArgv(opts: RunOptions): string[] {
@@ -104,6 +107,8 @@ export function notify(notifyCommand: string | undefined, rec: TaskRecord): void
   }
   const suppressed = st?.suppressed ?? 0;
   notifyState.set(key, { lastTs: now, suppressed: 0 });
+  // v0.4.3 超时类失败（failReason 含 timeout）告警附建议：任务过大请拆分
+  const advice = failureAdvice(classifyFailure(rec));
   const env = {
     ...process.env,
     HB_TASK_ID: rec.id,
@@ -112,7 +117,10 @@ export function notify(notifyCommand: string | undefined, rec: TaskRecord): void
     HB_EXIT_CODE: String(rec.exitCode ?? ""),
     HB_SESSION_ID: rec.sessionId ?? "",
     HB_LOG_FILE: rec.logFile ?? "",
+    HB_FAIL_REASON: rec.failReason ?? "",
     HB_SUPPRESSED: suppressed > 0 ? String(suppressed) : "",
+    ...(advice ? { HB_ADVICE: advice } : {}),
+    ...(rec.hasOutput === true ? { HB_HAS_OUTPUT: "1" } : {}),
   };
   // v0.4.2 送达兜底：微信每20分钟重连窗口(:02/:22/:42)内发送必失败，
   // 失败告警自身不能静默丢失，重试穿透（最多3次尝试，间隔3s）
@@ -217,6 +225,11 @@ export function runTask(opts: RunOptions): TaskRecord {
     const rec = finalize(withPid, "failed", null, null, startedMs, null, logFile, err.message);
     opts.ledger.append(rec);
     notify(opts.notifyCommand, rec);
+    try {
+      opts.onFinal?.(rec);
+    } catch {
+      // 编排回调失败不影响台账
+    }
   });
 
   child.on("exit", (code, signal) => {
@@ -234,6 +247,11 @@ export function runTask(opts: RunOptions): TaskRecord {
     );
     opts.ledger.append(rec);
     notify(opts.notifyCommand, rec);
+    try {
+      opts.onFinal?.(rec);
+    } catch {
+      // 编排回调失败不影响台账
+    }
   });
 
   return withPid;

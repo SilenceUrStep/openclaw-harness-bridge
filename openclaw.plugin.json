@@ -2,7 +2,7 @@
   "id": "harness-bridge",
   "name": "Harness Bridge",
   "description": "Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, ...) from OpenClaw.",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "configSchema": {
     "type": "object",
     "properties": {
@@ -33,6 +33,101 @@
       "taskboardFile": {
         "type": "string",
         "description": "taskboard.md 路径，状态行合并其「进行中」段"
+      },
+      "turnPrepareEnabled": {
+        "type": "boolean",
+        "description": "v0.4.1 每回合 agent_turn_prepare 注入后台任务清单（默认开启，无任务零注入）"
+      },
+      "metricsEnabled": {
+        "type": "boolean",
+        "description": "v0.4.1 进程内观测采样器：内存/事件循环延迟每分钟采样，环形缓冲24h（默认开启）"
+      },
+      "eventRetentionDays": {
+        "type": "number",
+        "description": "v0.4.1 task_event 事件流水保留天数，默认 30，0 表示不清理"
+      },
+      "routing": {
+        "type": "object",
+        "properties": {
+          "default": {
+            "type": "string",
+            "description": "v0.4.3 默认 harness（未显式指定且 taskType 无匹配时使用）"
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "taskType",
+                "harness"
+              ],
+              "properties": {
+                "taskType": {
+                  "type": "string",
+                  "description": "任务类型，如 coding/general/analysis/search"
+                },
+                "harness": {
+                  "type": "string",
+                  "description": "目标 adapter id"
+                },
+                "fallback": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "规则级降级链（覆盖 routing.fallback 同名项）"
+                }
+              }
+            },
+            "description": "v0.4.3 taskType → harness 路由规则覆盖（优先于 capabilities 匹配）"
+          },
+          "fallback": {
+            "type": "object",
+            "patternProperties": {
+              "^.*$": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "v0.4.3 harness → 降级链（重试耗尽且 harness 不可用时依次接管）"
+          },
+          "retryAttempts": {
+            "type": "number",
+            "description": "v0.4.3 失败后同 harness 自动重试次数，默认 1，0 关闭"
+          }
+        }
+      },
+      "healthWatchdog": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "v0.4.3 定时探活开关，默认开启"
+          },
+          "intervalMs": {
+            "type": "number",
+            "description": "v0.4.3 探活间隔毫秒，默认 300000（5 分钟）"
+          }
+        }
+      },
+      "timeouts": {
+        "type": "object",
+        "properties": {
+          "idleTimeoutMs": {
+            "type": "number",
+            "description": "http 任务 SSE 流静默核查阈值毫秒，默认 300000（5 分钟），0=禁用静默核查"
+          },
+          "maxDurationMs": {
+            "type": "number",
+            "description": "http 任务总时长兜底毫秒，默认 7200000（2 小时）；触发后核查会话状态而非直接判失败；旧 timeoutMs 参数继续兼容"
+          },
+          "sessionCheckMaxRetries": {
+            "type": "number",
+            "description": "连续会话核查仍 running 的告警阈值次数，默认 3"
+          }
+        }
       }
     }
   },
