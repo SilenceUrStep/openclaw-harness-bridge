@@ -65,6 +65,16 @@ harness_status { }                                        // poll progress / res
 | `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail) |
 | `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
 
+## What's new in v0.4.3
+
+- **Capability-based routing** — adapters declare `capabilities` (e.g. opencode=`["coding"]`, dsh=`["general","analysis","search"]`); `harness_run` accepts an optional `taskType`; priority: explicit harness > taskType match > default. Declarative `routing` config with per-rule fallback chains; every routing decision is logged to the ledger.
+- **Auto-retry + fallback routing** — failed tasks retry on the same harness (configurable, default 1), then fall down the configured fallback chain. Only infrastructure-class failures (probe failure / process start failure) trigger fallback; business failures alert without degrading.
+- **Periodic health probing** — all registered adapters probed every 5 minutes (configurable); healthy↔unhealthy transitions push alerts via `notifyCommand` with anti-spam (no repeat alerts for a persistent fault, recovery notification on heal).
+- **Host version awareness + upgrade self-check** — the plugin records the host version at startup; on change it runs a smoke self-check (adapter registration, echo round-trip, hooks confirmation) and pushes the report.
+- **Enhanced binary diagnostics** — `harness_list` healthDetail now includes the current PATH, the actual binary location when findable, and the likely cause (e.g. a dangling `~/.nvm/current` symlink).
+- **Two-level timeout for HTTP tasks** — replaces the blunt total-duration kill: idle timeout (default 5 min without events) triggers a `GET /session` check; running → re-attach SSE and keep watching; idle → settle success; missing → workspace output probe (`git status`) marks `hasOutput` so finished work is never mistaken for garbage and re-dispatched over. Total-duration backstop (default 2 h) goes through the same check flow and never aborts blindly.
+- New config keys: `idleTimeoutMs`, `maxDurationMs`, `sessionCheckMaxRetries`, `routing`.
+
 ## What's new in v0.4.2
 
 - **Auto dispatch logging** — `before_tool_call`/`after_tool_call` hooks: every background `harness_run` dispatch is auto-logged to the taskboard's "🤖 自动登记" section (pending entry → bound taskId → lazy prune on completion). Cures "promised but untracked"; fail-open throughout.
