@@ -92,3 +92,64 @@ describe("notify 节流（v0.4.1）", () => {
     expect(spawnSyncMock).toHaveBeenCalledTimes(3);
   }, 15000);
 });
+
+describe("notify 成功通知（v0.4.4 长任务完成）", () => {
+  it("时长达到阈值（默认 5min）推 task_success 通知，env 齐全", () => {
+    notify(
+      "echo ok",
+      rec({ id: "s1", status: "success", durationMs: 400_000, tokensInput: 100, tokensOutput: 50 }),
+    );
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+    const opts = spawnSyncMock.mock.calls[0][2] as { env: Record<string, string> };
+    expect(opts.env.HB_ALERT).toBe("task_success");
+    expect(opts.env.HB_TASK_ID).toBe("s1");
+    expect(opts.env.HB_HARNESS).toBe("opencode");
+    expect(opts.env.HB_DURATION).toBe("6m40s");
+    expect(opts.env.HB_COST_TOKENS).toBe("150");
+    expect(opts.env.HB_TIME).toBeTruthy();
+  });
+
+  it("短于阈值的成功维持静默", () => {
+    notify("echo ok", rec({ id: "s2", status: "success", durationMs: 1000 }));
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("阈值显式配置生效", () => {
+    notify(
+      "echo ok",
+      rec({ id: "s3", status: "success", durationMs: 2000 }),
+      1000,
+    );
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("阈值 ≤0 禁用成功通知", () => {
+    notify(
+      "echo ok",
+      rec({ id: "s4", status: "success", durationMs: 400_000 }),
+      0,
+    );
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+  });
+
+  it("同一任务只发一次成功通知", () => {
+    notify("echo ok", rec({ id: "s5", status: "success", durationMs: 400_000 }));
+    notify("echo ok", rec({ id: "s5", status: "success", durationMs: 400_000 }));
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("成功通知不参与失败节流：随后同 harness 失败照常通知", () => {
+    notify("echo ok", rec({ id: "s6", status: "success", durationMs: 400_000 }));
+    notify("echo ok", rec({ id: "s7", status: "failed" }));
+    expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+    const opts = spawnSyncMock.mock.calls[1][2] as { env: Record<string, string> };
+    expect(opts.env.HB_ALERT).toBeUndefined();
+    expect(opts.env.HB_STATUS).toBe("failed");
+  });
+
+  it("无 tokens 字段时不带 HB_COST_TOKENS", () => {
+    notify("echo ok", rec({ id: "s8", status: "success", durationMs: 400_000 }));
+    const opts = spawnSyncMock.mock.calls[0][2] as { env: Record<string, string> };
+    expect(opts.env.HB_COST_TOKENS).toBeUndefined();
+  });
+});

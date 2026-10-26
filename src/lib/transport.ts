@@ -191,12 +191,30 @@ export function checkVersionGate(version: string | undefined, gate: VersionGate)
   return { ok: true, version };
 }
 
-/** http 型 adapter 的版本读取（transport.versionPath，默认 /version） */
+/**
+ * http 型 adapter 的版本读取（v0.4.4 多端点适配）：
+ * 显式 transport.versionPath 优先；否则先试 GET /global/health（新 SDK，{"healthy":true,"version":"1.18.x"}），
+ * 再回退 /version（旧 SDK）。全部失败返回 undefined（调用方显性提示探测不可用）。
+ */
 export async function fetchHttpVersion(
   transport: HttpTransport,
   opts?: { timeoutMs?: number; cwd?: string },
 ): Promise<string | undefined> {
-  const path = transport.versionPath ?? "/version";
+  const candidates = transport.versionPath
+    ? [transport.versionPath]
+    : ["/global/health", "/version"];
+  for (const path of candidates) {
+    const v = await fetchHttpVersionAt(transport, path, opts);
+    if (v !== undefined) return v;
+  }
+  return undefined;
+}
+
+async function fetchHttpVersionAt(
+  transport: HttpTransport,
+  path: string,
+  opts?: { timeoutMs?: number; cwd?: string },
+): Promise<string | undefined> {
   const url = `${transport.baseUrl.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
   try {
     const ac = new AbortController();
@@ -211,7 +229,9 @@ export async function fetchHttpVersion(
         if (typeof json.version === "string") return json.version;
         if (typeof json.data === "string") return json.data;
       } catch {
-        // 纯文本版本号
+        // 纯文本版本号：仅当形似版本才采信（防 SPA fallback HTML 被当版本，v0.4.4）
+        if (parseSemver(text)) return text;
+        return undefined;
       }
       return text;
     } finally {

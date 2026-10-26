@@ -2,13 +2,16 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { checkHealth, type Adapter } from "./adapters.js";
-import { truncate2kb, type Ledger, type TaskRecord } from "./ledger.js";
-import { newTaskId, notify } from "./runner.js";
+import { truncate2kb, type Ledger, type LedgerEventType, type TaskRecord, type TimeoutSource } from "./ledger.js";
+import { newTaskId, notify, sendStallAlert, timeoutRecordFields } from "./runner.js";
 import { checkVersionGate } from "./transport.js";
 
 /** RFC §4.1 事件线界：单行 8KB / 单事件 32KB，超限截断并带标记 */
 const MAX_LINE_CHARS = 8 * 1024;
 const MAX_EVENT_CHARS = 32 * 1024;
+
+/** v0.4.4 进程判定器单次 RPC 探活的超时（短探针，不占用任务预算） */
+const PROBE_TIMEOUT_MS = 2000;
 
 export interface StdioRpcConfig {
   type: "stdio-rpc";
@@ -26,6 +29,14 @@ export interface DshRunOptions {
   dshHome?: string;
   wait: boolean;
   timeoutMs: number;
+  /** v0.4.4 实际生效超时的来源（resolveTaskTimeout 解析结果，记台账） */
+  timeoutSource?: TimeoutSource;
+  /** v0.4.4 成功通知阈值毫秒：任务时长达到阈值才推成功通知；≤0 禁用（默认 300000） */
+  successNotifyMinDurationMs?: number;
+  /** v0.4.4 进程判定器：连续探活无响应的告警阈值次数（默认 3，与 http sessionCheckMaxRetries 同语义） */
+  sessionCheckMaxRetries?: number;
+  /** v0.4.4 测试钩子：两次探活的间隔毫秒（默认 5000） */
+  checkIntervalMs?: number;
   ledger: Ledger;
   tasksDir: string;
   notifyCommand?: string;
@@ -314,6 +325,7 @@ export async function runDshTask(opts: DshRunOptions): Promise<TaskRecord> {
     startedAt,
     logFile,
     title: `${id}; ${opts.prompt.slice(0, 60)}`,
+    ...timeoutRecordFields(opts.timeoutMs, opts.timeoutSource),
     ...(opts.fallbackUsed ? { fallbackUsed: true } : {}),
   };
   opts.ledger.append(base);
@@ -329,6 +341,100 @@ export async function runDshTask(opts: DshRunOptions): Promise<TaskRecord> {
     })
     .catch(() => {}); // 失败已在 executeDshTask 内部落台账，防止 unhandled rejection
   return { ...base };
+}
+
+/**
+ * v0.4.4 进程判定器的存活视图（窄接口，测试可直接构造假实现）：
+ * dsh 是进程型（stdio-rpc），判定信号源 = 进程退出码（权威）+ RPC 探活响应。
+ * 与 runner-http 的会话核查判定器（GET /session 分流）并列，runner 层只按 transport 调度。
+ */
+export interface DshProcessView {
+  /** 进程是否已退出（exit 回调置位） */
+  closed: boolean;
+  /** 退出码（未退出为 null；被信号杀死时 exitCode 为 null，需看 signal） */
+  exitCode: number | null;
+  /** RPC 探活：session/wait 短探针（返回 = 会话已结束；reject 超时 = 无响应） */
+  probe: (timeoutMs: number) => Promise<unknown>;
+}
+
+/** 从常驻 DshProc 构造存活视图 */
+export function dshProcessView(p: DshProc, sessionId: string): DshProcessView {
+  return {
+    get closed() {
+      return p.closed;
+    },
+    get exitCode() {
+      return p.child.exitCode;
+    },
+    probe: (timeoutMs) => request(p, "session/wait", { sessionId }, timeoutMs),
+  };
+}
+
+export interface DshAdjudicateDeps {
+  view: DshProcessView;
+  sessionId: string;
+  taskId: string;
+  /** 触发判定的总时长超时值（failReason 语义沿用） */
+  timeoutMs: number;
+  ledger: Ledger;
+  notifyCommand?: string;
+  sessionCheckMaxRetries?: number;
+  checkIntervalMs?: number;
+  finalize: (status: TaskRecord["status"], reason?: string) => TaskRecord;
+}
+
+/**
+ * v0.4.4 dsh 进程判定器（超时触发，绝不直接判 failed）：
+ * ① 进程已退 → 按退出码结算（0=success，非 0=failed）；
+ * ② 进程还在 → session/wait 探活：有响应（恢复响应）→ 会话已结束，正常结算 success；
+ *    非超时类 rpc 错误 → 按 rpc 业务错误结算 failed；
+ *    连续 N 次（sessionCheckMaxRetries，默认 3）无响应 → 标记 stalled 并告警
+ *    （不自动杀进程，人工介入），结算 timeout。
+ */
+export async function adjudicateDshTimeout(deps: DshAdjudicateDeps): Promise<TaskRecord> {
+  const maxRetries = deps.sessionCheckMaxRetries ?? 3;
+  const intervalMs = deps.checkIntervalMs ?? 5000;
+  const track = (type: LedgerEventType, payload: unknown): void => {
+    try {
+      deps.ledger.addEvents(deps.taskId, [{ type, payload, ts: new Date().toISOString() }]);
+    } catch {
+      // 事件台账失败不影响结算
+    }
+  };
+  // ① 进程已退 → 退出码权威
+  if (deps.view.closed) {
+    const code = deps.view.exitCode;
+    track("session_check", { judge: "process", alive: false, exitCode: code });
+    track("session_settled", { outcome: code === 0 ? "success" : "failed", exitCode: code });
+    return deps.finalize(
+      code === 0 ? "success" : "failed",
+      code === 0 ? undefined : `dsh sdk 进程已退出（exit=${code ?? "?"}）`,
+    );
+  }
+  // ② 进程存活 → RPC 探活分流
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    track("session_check", { judge: "process", alive: true, attempt, maxRetries });
+    try {
+      await deps.view.probe(PROBE_TIMEOUT_MS);
+      // 恢复响应：session/wait 返回 = 会话已结束，正常结算
+      track("session_settled", { outcome: "success", probe: "responsive", attempt });
+      return deps.finalize("success");
+    } catch (err) {
+      const msg = (err as Error).message ?? String(err);
+      if (!msg.includes("超时")) {
+        // rpc 业务错误（协议错误等）→ failed
+        track("session_settled", { outcome: "failed", error: msg, attempt });
+        return deps.finalize("failed", msg);
+      }
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, intervalMs));
+      }
+    }
+  }
+  const detail = `dsh 进程存活但 RPC 连续 ${maxRetries} 次探活无响应（会话 ${deps.sessionId}），疑似 stalled，需人工介入（进程未终止）`;
+  sendStallAlert(deps.notifyCommand, deps.taskId, deps.sessionId, detail);
+  track("session_still_running", { judge: "process", stalled: true, maxRetries });
+  return deps.finalize("timeout", `${detail}；timeout after ${deps.timeoutMs}ms`);
 }
 
 async function executeDshTask(opts: DshRunOptions, base: TaskRecord): Promise<TaskRecord> {
@@ -358,7 +464,7 @@ async function executeDshTask(opts: DshRunOptions, base: TaskRecord): Promise<Ta
       ...(fr ? { failReason: fr } : {}),
     };
     opts.ledger.append(rec);
-    notify(opts.notifyCommand, rec);
+    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
     return rec;
   };
 
@@ -412,8 +518,9 @@ async function executeDshTask(opts: DshRunOptions, base: TaskRecord): Promise<Ta
   })();
 
   let done = false;
+  let timeoutFired = false;
   const timer = setTimeout(() => {
-    failReason ??= `timeout after ${opts.timeoutMs}ms`;
+    timeoutFired = true;
     done = true;
   }, opts.timeoutMs);
 
@@ -438,10 +545,29 @@ async function executeDshTask(opts: DshRunOptions, base: TaskRecord): Promise<Ta
       }
     }
   } catch (err) {
-    failReason ??= (err as Error).message;
+    const msg = (err as Error).message;
+    // v0.4.4：超时触发时的 rpc 超时/进程退出错误交给进程判定器统一分流，不抢先定因
+    if (!timeoutFired || (!msg.includes("超时") && !msg.includes("已退出"))) {
+      failReason ??= msg;
+    }
   } finally {
     clearTimeout(timer);
     unsub();
+  }
+
+  // v0.4.4 dsh 进程判定器：超时触发时先查进程存活，按真实状态分流（不直接判 failed）
+  if (timeoutFired && !failReason) {
+    return adjudicateDshTimeout({
+      view: dshProcessView(proc, sessionId),
+      sessionId,
+      taskId: base.id,
+      timeoutMs: opts.timeoutMs,
+      ledger: opts.ledger,
+      notifyCommand: opts.notifyCommand,
+      sessionCheckMaxRetries: opts.sessionCheckMaxRetries,
+      checkIntervalMs: opts.checkIntervalMs,
+      finalize,
+    });
   }
   if (!done && !failReason) failReason = "dsh 会话未在超时内结束";
   return finalize(failReason ? "failed" : "success");
@@ -519,7 +645,7 @@ export async function runDshHeadless(opts: DshRunOptions, base?: TaskRecord): Pr
     };
     if (events.length) opts.ledger.addEvents(rec.id, events);
     opts.ledger.append(rec);
-    notify(opts.notifyCommand, rec);
+    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
     return rec;
   } catch (err) {
     const rec: TaskRecord = {
@@ -532,7 +658,7 @@ export async function runDshHeadless(opts: DshRunOptions, base?: TaskRecord): Pr
     };
     if (events.length) opts.ledger.addEvents(rec.id, events);
     opts.ledger.append(rec);
-    notify(opts.notifyCommand, rec);
+    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
     return rec;
   }
 }

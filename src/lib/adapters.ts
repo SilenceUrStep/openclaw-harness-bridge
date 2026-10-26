@@ -128,7 +128,13 @@ export interface BridgeConfig {
   adaptersDir?: string;
   paramsFile?: string;
   notifyCommand?: string;
+  /** v0.4.4 全局兜底工作空间：harness_run 未传 cwd 时用它（再未配置则用 serve 进程默认） */
+  globalWorkspace?: string;
+  /** v0.4.4 成功通知阈值毫秒：任务时长达到阈值才推成功通知；≤0 禁用（默认 300000） */
+  successNotifyMinDurationMs?: number;
   defaultTimeoutMs?: number;
+  /** v0.4.4 taskType → 默认超时毫秒映射（未显式传 timeoutMs 时覆盖内置默认：coding 45min，其余 10min） */
+  defaultTimeoutByTaskType?: Record<string, number>;
   /** v0.4.3 能力路由 + 重试降级（不配置则行为与 0.4.2 一致） */
   routing?: RoutingConfig;
   /** v0.4.3 定时探活 + 状态变化告警（默认开启，间隔 5 分钟） */

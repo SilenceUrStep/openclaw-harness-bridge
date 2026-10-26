@@ -65,6 +65,16 @@ harness_status { }                                        // poll progress / res
 | `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail) |
 | `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
 
+## What's new in v0.4.4
+
+- **taskType-aware default timeout** — when `timeoutMs` is omitted, the default is resolved per `taskType`: coding → 45 min, general/analysis/search → 10 min, none → 10 min (previous behavior). Overridable via `defaultTimeoutByTaskType` config. The effective value and its source (`explicit` / `taskType_default` / `global_default`) are recorded on the task row (`timeout_ms` / `timeout_source`) plus a `timeout_resolved` ledger event. Resolution is unified across cli / dsh / http transports.
+- **Alert channel consolidation** — the alert dispatch script ships with the plugin (`scripts/hb_notify.sh`); machine-specific values are injected via `HB_NOTIFY_TARGET` / `HB_NOTIFY_CHANNEL` / `HB_NOTIFY_BIN`. See "Alert channels" below.
+- **Long-task success notification** — successful tasks no longer stay silent: when the task duration reaches `successNotifyMinDurationMs` (default 300000 = 5 min; `<=0` disables), a one-shot `HB_ALERT=task_success` notification is sent (not throttled, once per task). Short successful tasks remain silent.
+- **globalWorkspace fallback** — workspace semantics inverted: coding tasks run in the target project folder (pass `cwd` explicitly); when omitted, the configured `globalWorkspace` is used; when that is unset, the serve process default applies (the plugin data directory is no longer used as a fallback). The effective cwd and its source (`explicit` / `globalWorkspace` / `serve_default`) are recorded on the task row (`cwd`) plus a `workspace_resolved` ledger event.
+- **Periodic WAL checkpoint** — the ledger runs `PRAGMA wal_checkpoint(TRUNCATE)` hourly (fail-open) to keep the WAL from growing unboundedly on long-running hosts; a `checkpoint` event records the WAL page stats.
+- **opencode version probe fixed** — the new SDK serves versions at `GET /global/health`; the legacy `/version` endpoint now returns the web SPA HTML. The probe tries explicit `versionPath` → `/global/health` → `/version` and only accepts version-looking text; when unavailable the health detail says so explicitly ("版本探测不可用") instead of a vague "未知".
+- **dsh process adjudicator** — on timeout the dsh runner now checks process liveness before settling: exited → settle by exit code (0=success, non-zero=failed); alive but RPC-unresponsive for N consecutive probes (default 3, shares `sessionCheckMaxRetries`) → mark stalled + alert, never kill automatically; responsive again → settle normally. The opencode session-check adjudicator and this process adjudicator are the two per-transport implementations; the runner layer only dispatches.
+
 ## What's new in v0.4.3
 
 - **Capability-based routing** — adapters declare `capabilities` (e.g. opencode=`["coding"]`, dsh=`["general","analysis","search"]`); `harness_run` accepts an optional `taskType`; priority: explicit harness > taskType match > default. Declarative `routing` config with per-rule fallback chains; every routing decision is logged to the ledger.
@@ -150,8 +160,29 @@ The `mount` block declares the knowledge-directory mounting mechanism: `harness_
 | `paramsFile` | built-in dictionary | Model parameter dictionary (exact / prefix / defaults 3-tier matching + skip_patterns) |
 | `notifyCommand` | none | Shell command executed when a background task finishes (env: `HB_TASK_ID` / `HB_HARNESS` / `HB_STATUS` / `HB_EXIT_CODE` / `HB_SESSION_ID` / `HB_LOG_FILE`) |
 | `defaultTimeoutMs` | 600000 | Default timeout for `harness_run` |
+| `defaultTimeoutByTaskType` | none | v0.4.4 — taskType → default timeout ms map (overrides built-ins when `timeoutMs` is omitted) |
+| `globalWorkspace` | none | v0.4.4 — fallback workspace for `harness_run` when `cwd` is omitted; unset → serve process default |
+| `successNotifyMinDurationMs` | 300000 | v0.4.4 — notify on success only when the task ran at least this long (`<=0` disables) |
 | `statusLineEnabled` | `true` | v0.4 — append a background-tasks status line to every outbound reply |
 | `taskboardFile` | none | v0.4 — markdown taskboard whose "in progress" section feeds the status line |
+
+## Alert channels
+
+All alerts flow through the single `notifyCommand` shell command; the event type is passed via the `HB_ALERT` env var. The plugin ships a reference implementation at `scripts/hb_notify.sh` (included in the published package) — recommended config:
+
+```json
+"notifyCommand": "bash <plugin-dir>/scripts/hb_notify.sh"
+```
+
+Machine-specific values are injected via env (never hardcoded in the script): `HB_NOTIFY_TARGET` (required, the `--target` value; sending is skipped when unset), `HB_NOTIFY_CHANNEL` (default `openclaw-weixin`), `HB_NOTIFY_BIN` (default `openclaw` from PATH).
+
+| `HB_ALERT` | Trigger | Environment variables |
+|------------|---------|----------------------|
+| `task_failed` (default) | Task terminal failure / timeout | `HB_TASK_ID` `HB_HARNESS` `HB_STATUS` `HB_EXIT_CODE` `HB_SESSION_ID` `HB_LOG_FILE` `HB_FAIL_REASON` `HB_SUPPRESSED` `HB_ADVICE` `HB_HAS_OUTPUT` |
+| `task_stall` | Session/process stalled (consecutive checks without progress; not auto-killed) | `HB_TASK_ID` `HB_SESSION_ID` `HB_DETAIL` `HB_TIME` |
+| `task_success` | v0.4.4 — long task finished successfully (duration ≥ `successNotifyMinDurationMs`) | `HB_TASK_ID` `HB_HARNESS` `HB_DURATION` `HB_COST_TOKENS` (when available) `HB_TIME` |
+| `health_change` | Watchdog health state transition | `HB_ADAPTER` `HB_STATE` `HB_PREV_STATE` `HB_DETAIL` `HB_TIME` |
+| `selfcheck` | Post-upgrade smoke self-check report | `HB_SELFCHECK` `HB_HOST_VERSION` `HB_DETAIL` `HB_TIME` |
 
 ## Ledger and logs
 

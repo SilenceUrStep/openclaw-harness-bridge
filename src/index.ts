@@ -19,7 +19,13 @@ import {
   type BridgeConfig,
 } from "./lib/adapters.js";
 import { Ledger, openLedgerAt, summarizeCost, type LedgerEvent, type TaskRecord } from "./lib/ledger.js";
-import { extractSessionId, fillTemplate, runTask } from "./lib/runner.js";
+import {
+  extractSessionId,
+  fillTemplate,
+  resolveTaskTimeout,
+  resolveWorkspace,
+  runTask,
+} from "./lib/runner.js";
 import { runHttpTask } from "./lib/runner-http.js";
 import { runDshTask } from "./lib/runner-dsh.js";
 import {
@@ -51,6 +57,7 @@ import { startupVersionCheck, type HostVersionApi } from "./lib/selfcheck.js";
 const metricsSampler = new MetricsSampler();
 let cleanupTimer: NodeJS.Timeout | null = null;
 let metricsSaveTimer: NodeJS.Timeout | null = null;
+let checkpointTimer: NodeJS.Timeout | null = null;
 /** v0.4.2 自动登记：toolCallId → 预登记条目 key（before/after 钩子串联） */
 const autoRegMap = new Map<string, string>();
 
@@ -82,6 +89,24 @@ const configSchema = Type.Object({
     }),
   ),
   defaultTimeoutMs: Type.Optional(Type.Number({ description: "harness_run 默认超时毫秒" })),
+  defaultTimeoutByTaskType: Type.Optional(
+    Type.Record(Type.String(), Type.Number(), {
+      description:
+        "v0.4.4 taskType → 默认超时毫秒映射（未显式传 timeoutMs 时优先于内置默认：coding 45min，general/analysis/search 10min）",
+    }),
+  ),
+  globalWorkspace: Type.Optional(
+    Type.String({
+      description:
+        "v0.4.4 全局兜底工作空间：harness_run 未传 cwd 时用它（经 directory header 传给 serve）；再未配置则用 serve 进程默认目录",
+    }),
+  ),
+  successNotifyMinDurationMs: Type.Optional(
+    Type.Number({
+      description:
+        "v0.4.4 成功通知阈值毫秒：后台任务时长达到阈值才推 HB_ALERT=task_success 通知；≤0 禁用（默认 300000=5 分钟，短任务成功维持静默）",
+    }),
+  ),
   statusLineEnabled: Type.Optional(
     Type.Boolean({ description: "出站消息强制追加「后台任务」状态行（默认开启）" }),
   ),
@@ -312,12 +337,20 @@ const toolEntry = defineToolPlugin({
         resumeSessionId: Type.Optional(
           Type.String({ description: "续接会话 ID（adapter 需支持 resume）" }),
         ),
-        cwd: Type.Optional(Type.String({ description: "工作目录，默认插件数据目录" })),
+        cwd: Type.Optional(
+          Type.String({
+            description:
+              "工作目录（编码任务推荐显式传项目文件夹）；不传时用 globalWorkspace 兜底，仍未配置则用 serve 进程默认目录",
+          }),
+        ),
         wait: Type.Optional(
           Type.Boolean({ description: "同步等待完成，默认 false（后台执行）" }),
         ),
         timeoutMs: Type.Optional(
-          Type.Number({ description: "超时毫秒，默认 adapter 配置或 600000" }),
+          Type.Number({
+            description:
+              "超时毫秒；省略时按 taskType 默认（v0.4.4：coding 2700000，general/analysis/search 600000，无 taskType 600000）",
+          }),
         ),
         retryOf: Type.Optional(
           Type.String({
@@ -345,6 +378,9 @@ const toolEntry = defineToolPlugin({
         const ledger = openLedger(cfg);
         const wait = params.wait === true;
 
+        // v0.4.4 工作区三级解析：显式 cwd > globalWorkspace 兜底 > serve 进程默认（不再兜底插件数据目录）
+        const ws = resolveWorkspace(params.cwd, cfg.globalWorkspace);
+
         // manual retryOf（fork-before-retry）保持 0.4.2 语义：仅首次派发生效
         let forkFromSessionId: string | undefined;
         let cliResumeSessionId = params.resumeSessionId;
@@ -364,18 +400,53 @@ const toolEntry = defineToolPlugin({
         const dispatch = async (harnessId: string, meta: DispatchMeta): Promise<DispatchResult> => {
           const adapter = harnessId === route.harness ? target : adapters.find((a) => a.id === harnessId);
           if (!adapter) return { ok: false, error: `路由目标 harness 未注册: ${harnessId}` };
-          const timeoutMs =
-            params.timeoutMs ?? adapter.delegate.timeoutMs ?? cfg.defaultTimeoutMs ?? 600000;
-          // http 任务两级判定：显式 params.timeoutMs > timeouts.maxDurationMs > 2h 缺省
-          // （delegate.timeoutMs 的总时长一刀切语义对 http 退役，仅 cli/dsh 沿用）
-          const maxDurationMs = params.timeoutMs ?? cfg.timeouts?.maxDurationMs ?? 7200000;
           const transport = resolveTransport(adapter);
+          // v0.4.4 统一超时解析：显式 > taskType 显式配置 > http 全局兜底 > 内置 taskType 默认 > 全局默认
+          const resolved = resolveTaskTimeout({
+            explicitTimeoutMs: params.timeoutMs,
+            taskType: params.taskType,
+            defaultTimeoutMs: cfg.defaultTimeoutMs,
+            defaultTimeoutByTaskType: cfg.defaultTimeoutByTaskType,
+            maxDurationMs: cfg.timeouts?.maxDurationMs,
+            isHttp: transport.kind === "http",
+          });
+          const timeoutMs = resolved.timeoutMs;
+          const trackResolved = (rec: TaskRecord): TaskRecord => {
+            try {
+              ledger.addEvents(rec.id, [
+                {
+                  type: "timeout_resolved",
+                  payload: {
+                    timeoutMs: resolved.timeoutMs,
+                    source: resolved.source,
+                    taskType: params.taskType ?? null,
+                    transport: transport.kind,
+                  },
+                  ts: new Date().toISOString(),
+                },
+                {
+                  type: "workspace_resolved",
+                  payload: {
+                    cwd: ws.cwd ?? null,
+                    source: ws.source,
+                    transport: transport.kind,
+                  },
+                  ts: new Date().toISOString(),
+                },
+              ]);
+            } catch {
+              // 事件写入失败不影响派发
+            }
+            return rec;
+          };
           const runCommon = {
             adapter,
             prompt: params.prompt,
-            cwd: params.cwd ?? dataDir,
+            cwd: ws.cwd,
             wait,
             timeoutMs,
+            timeoutSource: resolved.source,
+            successNotifyMinDurationMs: cfg.successNotifyMinDurationMs,
             ledger,
             tasksDir,
             notifyCommand: cfg.notifyCommand,
@@ -389,12 +460,13 @@ const toolEntry = defineToolPlugin({
                 command: adapter.binary,
               }) as StdioRpcTransport,
               dshHome: path.join(dataDir, "dsh-home"),
+              sessionCheckMaxRetries: cfg.timeouts?.sessionCheckMaxRetries,
             });
-            return { ok: true, rec };
+            return { ok: true, rec: trackResolved(rec) };
           }
           if (transport.kind === "http") {
             const ht = transport.config as HttpTransport;
-            const probe = await probeHttpHealth(ht, { cwd: params.cwd ?? dataDir });
+            const probe = await probeHttpHealth(ht, { cwd: ws.cwd });
             if (!probe.ok && cliFallbackOf(adapter)) {
               const rec = runTask({ ...runCommon, resumeSessionId: cliResumeSessionId });
               ledger.append({ ...rec, transport: "cli", fallbackUsed: true });
@@ -411,11 +483,11 @@ const toolEntry = defineToolPlugin({
               transport: ht,
               resumeSessionId: cliResumeSessionId,
               forkFromSessionId: meta.isInitial ? forkFromSessionId : undefined,
-              maxDurationMs,
+              maxDurationMs: timeoutMs,
               idleTimeoutMs: cfg.timeouts?.idleTimeoutMs,
               sessionCheckMaxRetries: cfg.timeouts?.sessionCheckMaxRetries,
             });
-            return { ok: true, rec };
+            return { ok: true, rec: trackResolved(rec) };
           }
           // cli：fork-before-retry 走 delegate.fork argv 模板，输出按 idPattern 提取新会话（仅首次派发）
           let effectiveResume = cliResumeSessionId;
@@ -430,7 +502,7 @@ const toolEntry = defineToolPlugin({
             }
             const forkArgv = fillTemplate(forkTpl, { sessionId: forkFromSessionId, prompt: params.prompt });
             const fr = spawnSync(forkArgv[0], forkArgv.slice(1), {
-              cwd: params.cwd ?? dataDir,
+              cwd: ws.cwd ?? dataDir,
               timeout: 30000,
               encoding: "utf8",
             });
@@ -444,7 +516,7 @@ const toolEntry = defineToolPlugin({
             effectiveResume = forked;
           }
           const rec = runTask({ ...runCommon, resumeSessionId: effectiveResume });
-          return { ok: true, rec };
+          return { ok: true, rec: trackResolved(rec) };
         };
 
         // v0.4.3 兼容门控：未配置 routing（不重试不降级）时单次派发，行为与 0.4.2 完全一致
@@ -772,6 +844,32 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
       cleanupTimer.unref?.();
     }
 
+    // v0.4.4 WAL 定期 checkpoint：每小时 TRUNCATE 合并（防长驻进程 WAL 膨胀），失败 fail-open
+    const checkpoint = () => {
+      try {
+        const r = openLedger(cfg).checkpoint();
+        if (r) {
+          try {
+            openLedger(cfg).addEvents("hb_checkpoint", [
+              {
+                type: "checkpoint",
+                payload: { busy: r.busy, log: r.log, checkpointed: r.checkpointed },
+                ts: new Date().toISOString(),
+              },
+            ]);
+          } catch {
+            // 事件写入失败不影响 checkpoint 本身
+          }
+        }
+      } catch {
+        // fail-open：checkpoint 失败不影响主流程
+      }
+    };
+    checkpoint();
+    if (checkpointTimer) clearInterval(checkpointTimer);
+    checkpointTimer = setInterval(checkpoint, 3600_000);
+    checkpointTimer.unref?.();
+
     // 网关停止时释放采样器与定时器（v0.4.2：停止前 flush 观测数据）
     api.on("gateway_stop", async () => {
       try {
@@ -797,6 +895,10 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
       if (metricsSaveTimer) {
         clearInterval(metricsSaveTimer);
         metricsSaveTimer = null;
+      }
+      if (checkpointTimer) {
+        clearInterval(checkpointTimer);
+        checkpointTimer = null;
       }
     });
   },

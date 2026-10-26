@@ -2,7 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, closeSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { Adapter } from "./adapters.js";
-import type { Ledger, TaskRecord, TaskStatus } from "./ledger.js";
+import type { Ledger, TaskRecord, TaskStatus, TimeoutSource, WorkspaceSource } from "./ledger.js";
 import { classifyFailure, failureAdvice } from "./resilience.js";
 
 export function newTaskId(now: Date = new Date()): string {
@@ -46,11 +46,97 @@ export interface RunOptions {
   cwd?: string;
   wait: boolean;
   timeoutMs: number;
+  /** v0.4.4 实际生效超时的来源（resolveTaskTimeout 解析结果，记台账） */
+  timeoutSource?: TimeoutSource;
+  /** v0.4.4 成功通知阈值毫秒：任务时长达到阈值才推成功通知；≤0 禁用（默认 300000） */
+  successNotifyMinDurationMs?: number;
   ledger: Ledger;
   tasksDir: string;
   notifyCommand?: string;
   /** v0.4.3 后台任务终态回调（重试/降级编排用）；wait=true 不触发 */
   onFinal?: (rec: TaskRecord) => void;
+}
+
+/** v0.4.4 内置 taskType 默认超时（毫秒）：coding 45 分钟，其余 10 分钟 */
+export const TASK_TYPE_DEFAULT_TIMEOUT_MS: Record<string, number> = {
+  coding: 2_700_000,
+  general: 600_000,
+  analysis: 600_000,
+  search: 600_000,
+};
+
+export interface ResolvedTimeout {
+  timeoutMs: number;
+  source: TimeoutSource;
+}
+
+/**
+ * v0.4.4 统一超时解析（各 transport 共用，治「漏传 timeoutMs 被默认 600s 掐」）。
+ * 优先级：显式 params.timeoutMs > taskType 显式配置（defaultTimeoutByTaskType）>
+ * http 全局兜底配置（timeouts.maxDurationMs，v0.4.3 兼容）> 内置 taskType 默认 >
+ * 全局 defaultTimeoutMs / 600000。taskType 未知时落到全局默认。
+ */
+export function resolveTaskTimeout(input: {
+  explicitTimeoutMs?: number;
+  taskType?: string;
+  defaultTimeoutMs?: number;
+  defaultTimeoutByTaskType?: Record<string, number>;
+  maxDurationMs?: number;
+  isHttp?: boolean;
+}): ResolvedTimeout {
+  if (input.explicitTimeoutMs != null) {
+    return { timeoutMs: input.explicitTimeoutMs, source: "explicit" };
+  }
+  if (input.taskType) {
+    const perType = input.defaultTimeoutByTaskType?.[input.taskType];
+    if (perType != null) return { timeoutMs: perType, source: "taskType_default" };
+  }
+  if (input.isHttp && input.maxDurationMs != null) {
+    return { timeoutMs: input.maxDurationMs, source: "global_default" };
+  }
+  if (input.taskType) {
+    const builtin = TASK_TYPE_DEFAULT_TIMEOUT_MS[input.taskType];
+    if (builtin != null) return { timeoutMs: builtin, source: "taskType_default" };
+  }
+  return { timeoutMs: input.defaultTimeoutMs ?? 600_000, source: "global_default" };
+}
+
+/** 任务记录回写实际生效超时（cli/dsh/http 共用的 base 字段片段） */
+export function timeoutRecordFields(
+  timeoutMs: number,
+  source?: TimeoutSource,
+): Pick<TaskRecord, "timeoutMs" | "timeoutSource"> {
+  return {
+    timeoutMs,
+    ...(source ? { timeoutSource: source } : {}),
+  };
+}
+
+/**
+ * v0.4.4 工作区三级解析：显式 cwd > globalWorkspace 兜底 > serve 进程默认（undefined）。
+ * 语义反转：编码任务默认在目标项目文件夹，不再兜底插件数据目录。
+ */
+export function resolveWorkspace(
+  explicitCwd?: string,
+  globalWorkspace?: string,
+): { cwd?: string; source: WorkspaceSource } {
+  const explicit = explicitCwd?.trim() ? explicitCwd.trim() : undefined;
+  const global = globalWorkspace?.trim() ? globalWorkspace.trim() : undefined;
+  if (explicit) return { cwd: explicit, source: "explicit" };
+  if (global) return { cwd: global, source: "globalWorkspace" };
+  return { cwd: undefined, source: "serve_default" };
+}
+
+/** v0.4.4 成功通知阈值默认 5 分钟（短于阈值的成功维持静默） */
+export const DEFAULT_SUCCESS_NOTIFY_MIN_MS = 300_000;
+
+/** 时长人性化（成功通知用）：1h2m3s / 2m3s / 3s */
+export function formatDuration(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m${s % 60}s`;
+  return `${Math.floor(m / 60)}h${m % 60}m`;
 }
 
 function buildArgv(opts: RunOptions): string[] {
@@ -94,10 +180,52 @@ export function resetNotifyThrottle(): void {
   notifyState.clear();
 }
 
-export function notify(notifyCommand: string | undefined, rec: TaskRecord): void {
+/** v0.4.4 成功通知去重：同一任务只发一次 */
+const successNotified = new Set<string>();
+
+/** 成功通知的 tokens 合计（input+output+reasoning，有任一字段才输出） */
+function totalTokens(rec: TaskRecord): number | null {
+  const fields = [rec.tokensInput, rec.tokensOutput, rec.tokensReasoning];
+  if (fields.every((v) => v == null)) return null;
+  return fields.reduce<number>((sum, v) => sum + (v ?? 0), 0);
+}
+
+/** v0.4.4 长任务成功通知：单次尝试、不参与失败节流、同一任务只发一次 */
+function notifySuccess(notifyCommand: string, rec: TaskRecord): void {
+  if (successNotified.has(rec.id)) return;
+  successNotified.add(rec.id);
+  const tokens = totalTokens(rec);
+  const env = {
+    ...process.env,
+    HB_ALERT: "task_success",
+    HB_TASK_ID: rec.id,
+    HB_HARNESS: rec.harness,
+    HB_DURATION: formatDuration(rec.durationMs ?? 0),
+    ...(tokens != null ? { HB_COST_TOKENS: String(tokens) } : {}),
+    HB_TIME: new Date().toISOString(),
+  };
+  try {
+    spawnSync("bash", ["-c", notifyCommand], { timeout: 15000, encoding: "utf8", env });
+  } catch {
+    // 成功通知失败不重试（非关键路径）
+  }
+}
+
+export function notify(
+  notifyCommand: string | undefined,
+  rec: TaskRecord,
+  successNotifyMinDurationMs?: number,
+): void {
   if (!notifyCommand) return;
-  // 终态通知只对失败/超时触发（成功不打扰）
-  if (rec.status === "success") return;
+  // v0.4.4 成功通知：任务时长 ≥ 阈值（默认 5 分钟）才推，≤0 禁用
+  if (rec.status === "success") {
+    const minMs = successNotifyMinDurationMs ?? DEFAULT_SUCCESS_NOTIFY_MIN_MS;
+    if (minMs <= 0) return;
+    if ((rec.durationMs ?? 0) < minMs) return;
+    notifySuccess(notifyCommand, rec);
+    return;
+  }
+  // 失败/超时终态通知（60s 节流见下）
   const now = Date.now();
   const key = rec.harness;
   const st = notifyState.get(key);
@@ -148,6 +276,35 @@ function syncSleep(ms: number): void {
   }
 }
 
+/**
+ * 任务停滞告警（v0.4.4 自 runner-http 收口至此，cli/dsh/http 共用）：
+ * spawn fire-and-forget（同 watchdog 告警通道；任务未终态，不走 notify 节流）。
+ */
+export function sendStallAlert(
+  notifyCommand: string | undefined,
+  taskId: string,
+  sessionId: string,
+  detail: string,
+): void {
+  if (!notifyCommand) return;
+  try {
+    const child = spawn("bash", ["-c", notifyCommand], {
+      env: {
+        ...process.env,
+        HB_ALERT: "task_stall",
+        HB_TASK_ID: taskId,
+        HB_SESSION_ID: sessionId,
+        HB_DETAIL: detail.length > 800 ? `${detail.slice(0, 800)}…` : detail,
+        HB_TIME: new Date().toISOString(),
+      },
+      stdio: "ignore",
+    });
+    child.unref?.();
+  } catch {
+    // 告警失败不影响观察
+  }
+}
+
 /** 执行任务：wait=true 同步等待；wait=false 后台执行（退出后回写台账 + 可选通知） */
 export function runTask(opts: RunOptions): TaskRecord {
   const argv = buildArgv(opts);
@@ -163,6 +320,7 @@ export function runTask(opts: RunOptions): TaskRecord {
     status: "running",
     startedAt,
     logFile,
+    ...timeoutRecordFields(opts.timeoutMs, opts.timeoutSource),
   };
   opts.ledger.append(base);
 
@@ -224,7 +382,7 @@ export function runTask(opts: RunOptions): TaskRecord {
     clearTimeout(timer);
     const rec = finalize(withPid, "failed", null, null, startedMs, null, logFile, err.message);
     opts.ledger.append(rec);
-    notify(opts.notifyCommand, rec);
+    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
     try {
       opts.onFinal?.(rec);
     } catch {
@@ -246,7 +404,7 @@ export function runTask(opts: RunOptions): TaskRecord {
       logFile,
     );
     opts.ledger.append(rec);
-    notify(opts.notifyCommand, rec);
+    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
     try {
       opts.onFinal?.(rec);
     } catch {

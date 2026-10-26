@@ -1,10 +1,17 @@
 import { appendFileSync } from "node:fs";
 import path from "node:path";
-import { execSync, spawn } from "node:child_process";
+import { execSync } from "node:child_process";
 import type { Adapter } from "./adapters.js";
-import { truncate2kb, type Ledger, type LedgerEventType, type TaskRecord, type TaskStatus } from "./ledger.js";
+import {
+  truncate2kb,
+  type Ledger,
+  type LedgerEventType,
+  type TaskRecord,
+  type TaskStatus,
+  type TimeoutSource,
+} from "./ledger.js";
 import { buildHttpHeaders, type HttpTransport } from "./transport.js";
-import { newTaskId, notify } from "./runner.js";
+import { newTaskId, notify, sendStallAlert, timeoutRecordFields } from "./runner.js";
 
 const SSE_ACCEPT = "text/event-stream";
 const EVENT_FLUSH_BATCH = 25;
@@ -152,32 +159,6 @@ export function probeWorkspaceOutput(cwd?: string): boolean {
     return String(out).trim().length > 0;
   } catch {
     return false;
-  }
-}
-
-/** 会话停滞告警：spawn fire-and-forget（同 watchdog 告警通道；任务未终态，不走 notify 节流） */
-function sendStallAlert(
-  notifyCommand: string | undefined,
-  taskId: string,
-  sessionId: string,
-  detail: string,
-): void {
-  if (!notifyCommand) return;
-  try {
-    const child = spawn("bash", ["-c", notifyCommand], {
-      env: {
-        ...process.env,
-        HB_ALERT: "task_stall",
-        HB_TASK_ID: taskId,
-        HB_SESSION_ID: sessionId,
-        HB_DETAIL: detail.length > 800 ? `${detail.slice(0, 800)}…` : detail,
-        HB_TIME: new Date().toISOString(),
-      },
-      stdio: "ignore",
-    });
-    child.unref?.();
-  } catch {
-    // 告警失败不影响观察
   }
 }
 
@@ -413,6 +394,10 @@ export interface HttpRunOptions {
   maxDurationMs?: number;
   /** 连续会话核查仍 running 的告警阈值次数（默认 3） */
   sessionCheckMaxRetries?: number;
+  /** v0.4.4 实际生效超时的来源（resolveTaskTimeout 解析结果，记台账） */
+  timeoutSource?: TimeoutSource;
+  /** v0.4.4 成功通知阈值毫秒：任务时长达到阈值才推成功通知；≤0 禁用（默认 300000） */
+  successNotifyMinDurationMs?: number;
   ledger: Ledger;
   tasksDir: string;
   notifyCommand?: string;
@@ -445,6 +430,7 @@ export async function runHttpTask(opts: HttpRunOptions): Promise<TaskRecord> {
     logFile,
     title: `${id}; ${opts.prompt.slice(0, 60)}`,
     ...(opts.forkFromSessionId ? { forkedFrom: opts.forkFromSessionId } : {}),
+    ...timeoutRecordFields(opts.timeoutMs, opts.timeoutSource),
     ...(opts.fallbackUsed ? { fallbackUsed: true } : {}),
   };
   opts.ledger.append(base);
@@ -594,7 +580,7 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
       // 日志落盘失败不阻断
     }
     ledger.append(rec);
-    notify(opts.notifyCommand, rec);
+    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
     return rec;
   };
 

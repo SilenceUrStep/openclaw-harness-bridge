@@ -54,20 +54,27 @@ export async function probeAdapterStatus(_cfg: BridgeConfig, a: Adapter): Promis
   };
   if (t.kind === "http") {
     const probe = await probeHttpHealth(t.config as HttpTransport);
+    // v0.4.4：不再仅 versionGate 配置时才取版本——展示与门禁统一走 fetchHttpVersion
+    //（新 SDK 经 /global/health 取真实版本；旧 SDK 回退 /version）
+    let version: string | undefined;
     let gate = checkVersionGate(undefined, a.versionGate ?? {});
-    if (a.versionGate && probe.ok) {
-      const v = await fetchHttpVersion(t.config as HttpTransport);
-      gate = checkVersionGate(v, a.versionGate);
+    if (probe.ok) {
+      version = await fetchHttpVersion(t.config as HttpTransport);
+      if (a.versionGate) gate = checkVersionGate(version, a.versionGate);
     }
     return {
       ...base,
+      // v0.4.4：http adapter 版本以 HTTP 端点探测为准，无条件覆盖 binary 探测泄漏（端点全失效时 version=undefined，显性「版本探测不可用」）
+      version: version,
       transport: "http",
       healthy: probe.ok && gate.ok,
       healthDetail: !probe.ok
         ? (probe.error ?? `HTTP ${probe.status}`)
-        : gate.ok
-          ? `HTTP ${probe.status}，版本 ${gate.version ?? "未知"}`
-          : (gate.detail ?? "版本门禁未通过"),
+        : !gate.ok
+          ? (gate.detail ?? "版本门禁未通过")
+          : version
+            ? `HTTP ${probe.status}，版本 ${version}`
+            : "版本探测不可用（SDK 2026.9.4）",
       cliFallback: cliFallbackOf(a),
       versionGate: a.versionGate ?? null,
     };

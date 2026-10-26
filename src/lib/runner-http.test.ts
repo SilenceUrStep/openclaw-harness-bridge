@@ -672,6 +672,8 @@ describe("runner-http: 超时两级判定（idle 核查 / 会话核查 / 产出�
       await mock.emitParts([part("p1", { type: "step-start" })], sid);
       // 随后持续静默（核查期间会话一直 running）；重挂后由延迟送达的 idle 事件结算
       setTimeout(() => {
+        // /session 同步翻转 idle：若 SSE 重挂窗口恰好吞掉 idle 事件，核查仍能按真实状态结算（消竞态）
+        mock.sessionInfo = { status: { type: "idle" } };
         mock.emit({ type: "session.status", properties: { status: { type: "idle" } } }, sid);
       }, 400);
     };

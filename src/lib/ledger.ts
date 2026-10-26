@@ -13,6 +13,12 @@ export type TaskStatus =
 
 export type TransportType = "cli" | "http" | "stdio-rpc";
 
+/** v0.4.4 实际生效超时的来源：显式传参 / taskType 默认 / 全局默认 */
+export type TimeoutSource = "explicit" | "taskType_default" | "global_default";
+
+/** v0.4.4 实际生效工作区的来源：显式传参 / globalWorkspace 兜底 / serve 进程默认 */
+export type WorkspaceSource = "explicit" | "globalWorkspace" | "serve_default";
+
 export interface TaskRecord {
   id: string;
   harness: string;
@@ -58,6 +64,10 @@ export interface TaskRecord {
   retryOf?: string | null;
   /** 超时/会话核查异常时的工作区产出探测：true = cwd 有未提交产出（failed + hasOutput 即 timeout_with_output 语义） */
   hasOutput?: boolean;
+  /** v0.4.4 实际生效的超时毫秒（统一经 resolveTaskTimeout 解析后回写） */
+  timeoutMs?: number;
+  /** v0.4.4 实际生效超时的来源（explicit / taskType_default / global_default） */
+  timeoutSource?: TimeoutSource;
 }
 
 export type LedgerEventType =
@@ -79,7 +89,13 @@ export type LedgerEventType =
   | "session_check"
   | "session_still_running"
   | "session_settled"
-  | "output_detected";
+  | "output_detected"
+  /** v0.4.4 taskType 感知默认超时：记录解析后的超时值与来源 */
+  | "timeout_resolved"
+  /** v0.4.4 WAL 定期 checkpoint（含 WAL 页数） */
+  | "checkpoint"
+  /** v0.4.4 工作区三级解析：记录实际生效 cwd 与来源 */
+  | "workspace_resolved";
 
 export interface LedgerEvent {
   taskId: string;
@@ -198,6 +214,8 @@ function migrateColumns(driver: SqlDriver): void {
     fallback_used: "INTEGER",
     retry_of: "TEXT",
     has_output: "INTEGER",
+    timeout_ms: "INTEGER",
+    timeout_source: "TEXT",
     prompt: "TEXT",
     cwd: "TEXT",
     pid: "INTEGER",
@@ -254,6 +272,8 @@ CREATE TABLE IF NOT EXISTS task (
   fallback_used INTEGER DEFAULT 0,
   retry_of TEXT,
   has_output INTEGER,
+  timeout_ms INTEGER,
+  timeout_source TEXT,
   prompt TEXT,
   cwd TEXT,
   pid INTEGER,
@@ -303,6 +323,8 @@ const TASK_COLUMNS = [
   "fallback_used",
   "retry_of",
   "has_output",
+  "timeout_ms",
+  "timeout_source",
   "prompt",
   "cwd",
   "pid",
@@ -344,6 +366,8 @@ function rowToRecord(r: TaskRow): TaskRecord {
   if (r.fallback_used != null) rec.fallbackUsed = r.fallback_used === 1;
   if (r.retry_of != null) rec.retryOf = r.retry_of as string;
   if (r.has_output != null) rec.hasOutput = r.has_output === 1;
+  if (r.timeout_ms != null) rec.timeoutMs = r.timeout_ms as number;
+  if (r.timeout_source != null) rec.timeoutSource = r.timeout_source as TimeoutSource;
   if (r.prompt != null) rec.prompt = r.prompt as string;
   if (r.cwd != null) rec.cwd = r.cwd as string;
   if (r.pid != null) rec.pid = r.pid as number;
@@ -381,6 +405,8 @@ function recordToRow(rec: TaskRecord): TaskRow {
   if (rec.fallbackUsed !== undefined) row.fallback_used = rec.fallbackUsed ? 1 : 0;
   if (rec.retryOf !== undefined) row.retry_of = rec.retryOf ?? null;
   if (rec.hasOutput !== undefined) row.has_output = rec.hasOutput ? 1 : 0;
+  if (rec.timeoutMs !== undefined) row.timeout_ms = rec.timeoutMs ?? null;
+  if (rec.timeoutSource !== undefined) row.timeout_source = rec.timeoutSource ?? null;
   if (rec.prompt !== undefined) row.prompt = rec.prompt ?? null;
   if (rec.cwd !== undefined) row.cwd = rec.cwd ?? null;
   if (rec.pid !== undefined) row.pid = rec.pid ?? null;
@@ -569,6 +595,34 @@ export class Ledger {
       changes?: number | bigint;
     };
     return Number(r.changes ?? 0);
+  }
+
+  /**
+   * v0.4.4 WAL 定期 checkpoint（TRUNCATE）：把 WAL 合并回主库并截断 WAL 文件，
+   * 防止长驻进程下 WAL 无限膨胀。失败 fail-open（记日志不抛，不阻断主流程）。
+   * 返回 busy（未能 checkpoint 的页数）/ log（WAL 总页数）/ checkpointed（已合并页数）。
+   */
+  checkpoint(): { busy: number; log: number; checkpointed: number } | undefined {
+    let db: SqlDriver;
+    try {
+      db = this.ready();
+    } catch (err) {
+      console.log(`[harness-bridge] wal_checkpoint 跳过（台账不可用）: ${(err as Error).message}`);
+      return undefined;
+    }
+    try {
+      const r = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as
+        | { busy?: number | bigint; log?: number | bigint; checkpointed?: number | bigint }
+        | undefined;
+      return {
+        busy: Number(r?.busy ?? 0),
+        log: Number(r?.log ?? 0),
+        checkpointed: Number(r?.checkpointed ?? 0),
+      };
+    } catch (err) {
+      console.log(`[harness-bridge] wal_checkpoint 失败（fail-open）: ${(err as Error).message}`);
+      return undefined;
+    }
   }
 
   /**

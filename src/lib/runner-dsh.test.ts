@@ -1,10 +1,10 @@
 import { createRequire } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import type { Adapter } from "./adapters.js";
-import { Ledger } from "./ledger.js";
-import { closeAllDshProcesses, runDshTask, type DshRunOptions } from "./runner-dsh.js";
+import { Ledger, type TaskRecord } from "./ledger.js";
+import { adjudicateDshTimeout, closeAllDshProcesses, runDshTask, type DshRunOptions } from "./runner-dsh.js";
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite");
@@ -235,4 +235,144 @@ describe("runner-dsh: stdio JSON-RPC", () => {
     const events = opts.ledger.getEvents(rec.id);
     expect(events.map((e) => e.type)).toEqual(["step", "tool_use", "text"]);
   }, 20000);
+});
+
+describe("v0.4.4 dsh 进程判定器（超时触发 → 进程存活分流）", () => {
+  function tmpLedger(): Ledger {
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-dsh-judge-"));
+    dirs.push(dir);
+    return new Ledger(path.join(dir, "ledger.db"));
+  }
+
+  function fakeFinalize() {
+    return (status: TaskRecord["status"], reason?: string): TaskRecord => ({
+      id: "hb_judge",
+      harness: "dsh",
+      transport: "stdio-rpc",
+      status,
+      ...(reason ? { failReason: reason } : {}),
+    });
+  }
+
+  const timeoutErr = () => new Error("dsh rpc session/wait 超时（2000ms）");
+
+  it("进程已退 exit=0 → 按退出码结算 success", async () => {
+    const l = tmpLedger();
+    const rec = await adjudicateDshTimeout({
+      view: { closed: true, exitCode: 0, probe: async () => { throw new Error("never"); } },
+      sessionId: "dsh_x",
+      taskId: "hb_judge",
+      timeoutMs: 5000,
+      ledger: l,
+      finalize: fakeFinalize(),
+    });
+    expect(rec.status).toBe("success");
+    expect(rec.failReason).toBeUndefined();
+    const types = l.getEvents("hb_judge").map((e) => e.type);
+    expect(types).toContain("session_check");
+    expect(types).toContain("session_settled");
+    l.close();
+  });
+
+  it("进程已退 exit=1 → failed 且 failReason 带退出码", async () => {
+    const l = tmpLedger();
+    const rec = await adjudicateDshTimeout({
+      view: { closed: true, exitCode: 1, probe: async () => { throw new Error("never"); } },
+      sessionId: "dsh_x",
+      taskId: "hb_judge",
+      timeoutMs: 5000,
+      ledger: l,
+      finalize: fakeFinalize(),
+    });
+    expect(rec.status).toBe("failed");
+    expect(rec.failReason).toContain("exit=1");
+    l.close();
+  });
+
+  it("进程存活但 RPC 连续 3 次无响应 → stalled 告警 + timeout（不杀进程）", async () => {
+    const l = tmpLedger();
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-dsh-alert-"));
+    dirs.push(dir);
+    const alertFile = path.join(dir, "alert.txt");
+    let probes = 0;
+    const rec = await adjudicateDshTimeout({
+      view: {
+        closed: false,
+        exitCode: null,
+        probe: async () => {
+          probes += 1;
+          throw timeoutErr();
+        },
+      },
+      sessionId: "dsh_x",
+      taskId: "hb_judge",
+      timeoutMs: 5000,
+      ledger: l,
+      notifyCommand: `${process.execPath} -e 'require("fs").appendFileSync(${JSON.stringify(alertFile)}, "stalled\\n")'`,
+      checkIntervalMs: 1,
+      finalize: fakeFinalize(),
+    });
+    expect(rec.status).toBe("timeout");
+    expect(rec.failReason).toContain("stalled");
+    expect(rec.failReason).toContain("人工介入");
+    expect(probes).toBe(3);
+    await vi.waitFor(() => expect(existsSync(alertFile)).toBe(true), { timeout: 5000 });
+    const stillRunning = l.getEvents("hb_judge").find((e) => e.type === "session_still_running");
+    expect(stillRunning).toBeDefined();
+    l.close();
+  }, 15000);
+
+  it("进程存活且探活恢复响应 → 正常结算 success", async () => {
+    const l = tmpLedger();
+    const rec = await adjudicateDshTimeout({
+      view: { closed: false, exitCode: null, probe: async () => ({ status: "ok" }) },
+      sessionId: "dsh_x",
+      taskId: "hb_judge",
+      timeoutMs: 5000,
+      ledger: l,
+      checkIntervalMs: 1,
+      finalize: fakeFinalize(),
+    });
+    expect(rec.status).toBe("success");
+    const settled = l.getEvents("hb_judge").find((e) => e.type === "session_settled");
+    expect((settled?.payload as { probe?: string }).probe).toBe("responsive");
+    l.close();
+  });
+
+  it("探活返回 rpc 业务错误（非超时）→ failed", async () => {
+    const l = tmpLedger();
+    const rec = await adjudicateDshTimeout({
+      view: {
+        closed: false,
+        exitCode: null,
+        probe: async () => {
+          throw new Error("dsh rpc error: session not found");
+        },
+      },
+      sessionId: "dsh_x",
+      taskId: "hb_judge",
+      timeoutMs: 5000,
+      ledger: l,
+      checkIntervalMs: 1,
+      finalize: fakeFinalize(),
+    });
+    expect(rec.status).toBe("failed");
+    expect(rec.failReason).toContain("session not found");
+    l.close();
+  });
+
+  it("集成：runDshTask 超时触发判定器 → 探活恢复响应 → success（timeout 字段落库）", async () => {
+    const { sdkScript, headlessScript } = writeMockScripts();
+    const adapter = dshAdapter(sdkScript, headlessScript, { version: "0.2.1" });
+    const transport = { command: process.execPath, args: [sdkScript, "--profile", "sdk"] };
+    const opts = makeOpts(adapter, transport, { timeoutMs: 60, timeoutSource: "taskType_default" });
+    const rec = await runDshTask(opts);
+    // mock 的 session/wait 120ms 后响应 → 判定器探活恢复 → success
+    expect(rec.status).toBe("success");
+    expect(rec.timeoutMs).toBe(60);
+    expect(rec.timeoutSource).toBe("taskType_default");
+    const types = opts.ledger.getEvents(rec.id).map((e) => e.type);
+    expect(types).toContain("session_check");
+    expect(types).toContain("session_settled");
+  }, 15000);
 });

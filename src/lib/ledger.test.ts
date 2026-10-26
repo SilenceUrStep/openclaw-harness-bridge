@@ -225,3 +225,76 @@ describe("Ledger (SQLite)", () => {
     rmSync(path.dirname(l.dbPath), { recursive: true, force: true });
   });
 });
+
+describe("v0.4.4 timeout 字段 + WAL checkpoint", () => {
+  it("timeoutMs / timeoutSource 落库并可读回", () => {
+    const l = tmpLedger();
+    l.append(rec({ id: "t8a", harness: "opencode", status: "running", timeoutMs: 2_700_000, timeoutSource: "taskType_default" }));
+    l.append(rec({ id: "t8a", harness: "opencode", status: "success" }));
+    const got = l.getById("t8a");
+    expect(got?.timeoutMs).toBe(2_700_000);
+    expect(got?.timeoutSource).toBe("taskType_default");
+    // 未设置时不误读
+    l.append(rec({ id: "t8b", harness: "echo", status: "success" }));
+    expect(l.getById("t8b")?.timeoutMs).toBeUndefined();
+    expect(l.getById("t8b")?.timeoutSource).toBeUndefined();
+    l.close();
+    rmSync(path.dirname(l.dbPath), { recursive: true, force: true });
+  });
+
+  it("checkpoint() 返回 WAL 页数统计且不抛错（TRUNCATE 后 log=0）", () => {
+    const l = tmpLedger();
+    l.append(rec({ id: "t9a", harness: "echo", status: "success" }));
+    const r = l.checkpoint();
+    expect(r).toBeDefined();
+    expect(typeof r!.busy).toBe("number");
+    expect(typeof r!.log).toBe("number");
+    expect(typeof r!.checkpointed).toBe("number");
+    expect(r!.checkpointed).toBeGreaterThanOrEqual(0);
+    l.close();
+    rmSync(path.dirname(l.dbPath), { recursive: true, force: true });
+  });
+
+  it("checkpoint / timeout_resolved 事件类型入事件台账（合成任务 id 自动补父行）", () => {
+    const l = tmpLedger();
+    l.addEvents("hb_checkpoint", [
+      { type: "checkpoint", payload: { busy: 0, log: 0, checkpointed: 3 }, ts: new Date().toISOString() },
+    ]);
+    l.append(rec({ id: "t9c", harness: "opencode", status: "running" }));
+    l.addEvents("t9c", [
+      {
+        type: "timeout_resolved",
+        payload: { timeoutMs: 600_000, source: "taskType_default", taskType: "coding" },
+        ts: new Date().toISOString(),
+      },
+    ]);
+    const sys = l.getEvents("hb_checkpoint");
+    expect(sys.length).toBe(1);
+    expect(sys[0].type).toBe("checkpoint");
+    expect(l.getById("hb_checkpoint")?.harness).toBe("__system__");
+    const ev = l.getEvents("t9c");
+    expect(ev[0].type).toBe("timeout_resolved");
+    expect(ev[0].payload).toEqual({ timeoutMs: 600_000, source: "taskType_default", taskType: "coding" });
+    l.close();
+    rmSync(path.dirname(l.dbPath), { recursive: true, force: true });
+  });
+
+  it("workspace_resolved 事件类型入事件台账（v0.4.4 工作区三级解析）", () => {
+    const l = tmpLedger();
+    l.append(rec({ id: "t9w", harness: "opencode", status: "running", cwd: "/tmp/global" }));
+    l.addEvents("t9w", [
+      {
+        type: "workspace_resolved",
+        payload: { cwd: "/tmp/global", source: "globalWorkspace", transport: "http" },
+        ts: new Date().toISOString(),
+      },
+    ]);
+    const ev = l.getEvents("t9w");
+    expect(ev.length).toBe(1);
+    expect(ev[0].type).toBe("workspace_resolved");
+    expect(ev[0].payload).toEqual({ cwd: "/tmp/global", source: "globalWorkspace", transport: "http" });
+    expect(l.getById("t9w")?.cwd).toBe("/tmp/global");
+    l.close();
+    rmSync(path.dirname(l.dbPath), { recursive: true, force: true });
+  });
+});

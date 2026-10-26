@@ -69,6 +69,16 @@ harness_status { }                                        // 查进度 / 结果
 | `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部） |
 | `harness_mount` | 把共享知识库目录挂载进 harness（external_directory 放行 + instructions 注入；dry-run/apply，幂等） |
 
+## v0.4.4 新特性
+
+- **taskType 感知默认超时** — 未显式传 `timeoutMs` 时按任务类型取默认：coding → 45 分钟，general/analysis/search → 10 分钟，无 taskType → 10 分钟（保持现状）。可用 `defaultTimeoutByTaskType` 配置覆盖。实际生效值与来源（`explicit` / `taskType_default` / `global_default`）记入台账 task 行（`timeout_ms` / `timeout_source` 列）并记 `timeout_resolved` 事件；cli / dsh / http 三路统一解析。
+- **长任务完成通知** — 成功不再静默：任务时长达到 `successNotifyMinDurationMs`（默认 300000=5 分钟；≤0 禁用）时推送一次性 `HB_ALERT=task_success` 通知（不参与失败节流，同一任务只发一次）。短任务成功维持静默。
+- **globalWorkspace 全局兜底工作空间** — 工作区语义反转：编码任务默认在目标项目文件夹（推荐显式传 `cwd`）；不传时用配置的 `globalWorkspace` 兜底；仍未配置则用 serve 进程默认目录（不再兜底插件数据目录）。实际生效 cwd 与来源（`explicit` / `globalWorkspace` / `serve_default`）记入台账 task 行（`cwd` 列）并记 `workspace_resolved` 事件。
+- **告警通道收口** — 告警分发脚本随包分发（`scripts/hb_notify.sh`），机器相关值经环境变量注入（`HB_NOTIFY_TARGET` / `HB_NOTIFY_CHANNEL` / `HB_NOTIFY_BIN`），不再散落外部。详见「告警通道」小节。
+- **WAL 定期 checkpoint** — 台账每小时执行 `PRAGMA wal_checkpoint(TRUNCATE)`（失败 fail-open），防长驻进程 WAL 无限膨胀；`checkpoint` 事件记录 WAL 页数。
+- **opencode 版本探测修复** — 新版 SDK 版本端点为 `GET /global/health`（旧 `/version` 已变成网页 SPA HTML）。探测顺序：显式 `versionPath` → `/global/health` → `/version`，纯文本仅在形似版本时采信；确实拿不到时显性输出「版本探测不可用」而非含糊的「未知」。
+- **dsh 进程判定器** — dsh 超时不再直接判死：先查进程存活——已退 → 按退出码结算（0=success 非 0=failed）；存活但 RPC 连续 N 次探活无响应（默认 3，复用 `sessionCheckMaxRetries`）→ 标记 stalled 并告警（不自动杀进程，人工介入）；恢复响应 → 正常结算。opencode 会话核查判定器与 dsh 进程判定器并列，runner 层只按 transport 调度。
+
 ## v0.4.2 新特性
 
 - **派发自动登记** — `before_tool_call`/`after_tool_call` 双钩子：`harness_run` 派发时自动往 taskboard「🤖 自动登记」段写条目（pending → 绑定 taskId → 终态惰性清理），治承诺悬空，全链路 fail-open。
@@ -146,8 +156,29 @@ harness_status { }                                        // 查进度 / 结果
 | `paramsFile` | 内置字典 | 模型参数字典（exact/prefix/defaults 三级匹配 + skip_patterns） |
 | `notifyCommand` | 无 | 后台任务完成时执行的 shell 命令（env: `HB_TASK_ID`/`HB_HARNESS`/`HB_STATUS`/`HB_EXIT_CODE`/`HB_SESSION_ID`/`HB_LOG_FILE`） |
 | `defaultTimeoutMs` | 600000 | `harness_run` 默认超时 |
+| `defaultTimeoutByTaskType` | 无 | v0.4.4 — taskType → 默认超时毫秒映射（未显式传 `timeoutMs` 时覆盖内置默认） |
+| `globalWorkspace` | 无 | v0.4.4 — `harness_run` 未传 `cwd` 时的兜底工作空间；未配置则用 serve 进程默认目录 |
+| `successNotifyMinDurationMs` | 300000 | v0.4.4 — 任务时长达到阈值才推成功通知（≤0 禁用） |
 | `statusLineEnabled` | `true` | v0.4 — 每条出站回复追加后台任务状态行 |
 | `taskboardFile` | 无 | v0.4 — markdown 任务台账「进行中」段并入状态行 |
+
+## 告警通道（Alert channels）
+
+所有告警走唯一的 `notifyCommand` shell 命令，事件类型经 `HB_ALERT` 环境变量区分。插件自带参考实现 `scripts/hb_notify.sh`（随包分发），推荐配置：
+
+```json
+"notifyCommand": "bash <插件目录>/scripts/hb_notify.sh"
+```
+
+机器相关值经环境变量注入（不写死在脚本里）：`HB_NOTIFY_TARGET`（必填，`--target` 的值；未设置则跳过发送）、`HB_NOTIFY_CHANNEL`（默认 `openclaw-weixin`）、`HB_NOTIFY_BIN`（默认 PATH 中的 `openclaw`）。
+
+| `HB_ALERT` | 触发场景 | 环境变量 |
+|------------|----------|----------|
+| `task_failed`（默认） | 任务终态失败 / 超时 | `HB_TASK_ID` `HB_HARNESS` `HB_STATUS` `HB_EXIT_CODE` `HB_SESSION_ID` `HB_LOG_FILE` `HB_FAIL_REASON` `HB_SUPPRESSED` `HB_ADVICE` `HB_HAS_OUTPUT` |
+| `task_stall` | 会话/进程停滞（连续核查无进展；不自动杀） | `HB_TASK_ID` `HB_SESSION_ID` `HB_DETAIL` `HB_TIME` |
+| `task_success` | v0.4.4 — 长任务成功完成（时长 ≥ `successNotifyMinDurationMs`） | `HB_TASK_ID` `HB_HARNESS` `HB_DURATION` `HB_COST_TOKENS`（如有） `HB_TIME` |
+| `health_change` | 探活状态翻转 | `HB_ADAPTER` `HB_STATE` `HB_PREV_STATE` `HB_DETAIL` `HB_TIME` |
+| `selfcheck` | 升级后冒烟自检报告 | `HB_SELFCHECK` `HB_HOST_VERSION` `HB_DETAIL` `HB_TIME` |
 
 ## 台账与日志
 

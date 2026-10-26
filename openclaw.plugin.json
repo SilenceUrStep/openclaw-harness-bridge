@@ -2,7 +2,7 @@
   "id": "harness-bridge",
   "name": "Harness Bridge",
   "description": "Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, ...) from OpenClaw.",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "configSchema": {
     "type": "object",
     "properties": {
@@ -25,6 +25,23 @@
       "defaultTimeoutMs": {
         "type": "number",
         "description": "harness_run 默认超时毫秒"
+      },
+      "defaultTimeoutByTaskType": {
+        "type": "object",
+        "patternProperties": {
+          "^.*$": {
+            "type": "number"
+          }
+        },
+        "description": "v0.4.4 taskType → 默认超时毫秒映射（未显式传 timeoutMs 时优先于内置默认：coding 45min，general/analysis/search 10min）"
+      },
+      "globalWorkspace": {
+        "type": "string",
+        "description": "v0.4.4 全局兜底工作空间：harness_run 未传 cwd 时用它（经 directory header 传给 serve）；再未配置则用 serve 进程默认目录"
+      },
+      "successNotifyMinDurationMs": {
+        "type": "number",
+        "description": "v0.4.4 成功通知阈值毫秒：后台任务时长达到阈值才推 HB_ALERT=task_success 通知；≤0 禁用（默认 300000=5 分钟，短任务成功维持静默）"
       },
       "statusLineEnabled": {
         "type": "boolean",
