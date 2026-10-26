@@ -1,6 +1,7 @@
 {
   "id": "dsh",
   "displayName": "DeepSeek Harness (dsh)",
+  "capabilities": ["general", "analysis", "search"],
   "description": "dsh stdio JSON-RPC SDK（多会话复用一进程 + DSH_HOME 隔离 + 版本门禁）；SDK 进程不可用时回落 headless NDJSON，版本越界显性拒绝",
   "schemaVersion": 2,
   "binary": "dsh",

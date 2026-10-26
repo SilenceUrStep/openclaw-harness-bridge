@@ -1,6 +1,7 @@
 {
   "id": "opencode",
   "displayName": "OpenCode",
+  "capabilities": ["coding"],
   "description": "OpenCode serve 模式（HTTP 直调 + SSE 事件流 + 事件级台账）；探活失败自动回落 cli",
   "schemaVersion": 2,
   "binary": "opencode",
