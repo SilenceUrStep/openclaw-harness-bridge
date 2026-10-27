@@ -1,15 +1,25 @@
 {
   "id": "dsh",
   "displayName": "DeepSeek Harness (dsh)",
-  "capabilities": ["general", "analysis", "search"],
+  "capabilities": [
+    "general",
+    "analysis",
+    "search"
+  ],
   "description": "dsh stdio JSON-RPC SDK（多会话复用一进程 + DSH_HOME 隔离 + 版本门禁）；SDK 进程不可用时回落 headless NDJSON，版本越界显性拒绝",
   "schemaVersion": 2,
   "binary": "dsh",
-  "versionCheck": ["dsh", "--version"],
-  "versionGate": { "min": "0.2.1", "max": "0.3.x" },
+  "versionCheck": [
+    "dsh",
+    "--version"
+  ],
+  "versionGate": {
+    "min": "0.2.1",
+    "max": "0.3.x"
+  },
   "sdk": {
-    "provider": "deepseek-official",
-    "model": "deepseek-flash"
+    "provider": "tokenhub",
+    "model": "glm-5.3-flash"
   },
   "modelSync": {
     "format": "dsh-patch",
@@ -21,17 +31,35 @@
       "baseURL": "https://api.lkeap.cloud.tencent.com/plan/v3",
       "apiKeyEnv": "TOKENHUB_API_KEY"
     },
-    "models": ["glm-5.3-flash", "glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash"],
-    "defaultModel": { "provider": "tokenhub", "model": "glm-5.3-flash" }
+    "models": [
+      "glm-5.3-flash",
+      "glm-5.2",
+      "deepseek-v4-pro",
+      "deepseek-v4-flash"
+    ],
+    "defaultModel": {
+      "provider": "tokenhub",
+      "model": "glm-5.3-flash"
+    }
   },
   "transport": {
     "type": "stdio-rpc",
     "command": "dsh",
-    "args": ["--profile", "sdk"]
+    "args": [
+      "--profile",
+      "sdk"
+    ]
   },
   "delegate": {
-    "run": ["dsh", "headless", "--json", "{prompt}"],
+    "run": [
+      "dsh",
+      "headless",
+      "--json",
+      "{prompt}"
+    ],
     "timeoutMs": 600000
   },
-  "session": { "idPattern": "dsh_[a-zA-Z0-9]+" }
+  "session": {
+    "idPattern": "dsh_[a-zA-Z0-9]+"
+  }
 }
