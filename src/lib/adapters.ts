@@ -123,6 +123,14 @@ export interface RunTimeoutsConfig {
   sessionCheckMaxRetries?: number;
 }
 
+/** v0.4.6 台账日报推送配置段 */
+export interface DailyReportConfig {
+  /** 默认开启（false 关闭） */
+  enabled?: boolean;
+  /** 推送时刻（Asia/Shanghai 小时），默认 21 点，到达即发（当日仅一次） */
+  hour?: number;
+}
+
 export interface BridgeConfig {
   dataDir?: string;
   adaptersDir?: string;
@@ -145,6 +153,12 @@ export interface BridgeConfig {
   agentOpsLogEnabled?: boolean;
   /** v0.4.5 agent 层操作日志文件路径，默认 <dataDir>/agent-ops.log */
   agentOpsLogFile?: string;
+  /** v0.4.6 agent-ops 日志轮转阈值字节，默认 10485760（10MB），0=禁用轮转 */
+  agentOpsLogMaxBytes?: number;
+  /** v0.4.6 agent-ops 日志轮转保留份数，默认 7 */
+  agentOpsLogKeep?: number;
+  /** v0.4.6 台账日报推送（默认开启，每天 21 点 Asia/Shanghai 经 notifyCommand 推送） */
+  dailyReport?: DailyReportConfig;
 }
 
 export function expandHome(p: string): string {

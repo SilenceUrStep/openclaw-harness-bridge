@@ -1,5 +1,5 @@
 import { describe, expect, it, afterAll } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { beijingTimestamp, logAgentOps, shouldLogAgentOps } from "./agent-ops-log.js";
@@ -121,5 +121,66 @@ describe("agent-ops-log（v0.4.5 agent 层操作日志）", () => {
     const ts = beijingTimestamp(new Date("2026-10-27T05:00:05.542Z"));
     expect(ts).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/);
     expect(ts.startsWith("2026-10-27 13:00:05.542")).toBe(true); // UTC+8
+  });
+});
+
+describe("agent-ops 日志轮转（v0.4.6 maxBytes/keep）", () => {
+  it("超 maxBytes 触发轮转：旧内容滚到 .1，新行写主文件", () => {
+    const file = tmpLogFile();
+    writeFileSync(file, "x".repeat(500));
+    logAgentOps({ toolName: "exec", params: { command: "after-rotate" }, logFile: file, maxBytes: 100 });
+    expect(existsSync(`${file}.1`)).toBe(true);
+    expect(readFileSync(`${file}.1`, "utf8")).toBe("x".repeat(500));
+    const main = readFileSync(file, "utf8");
+    expect(main).toContain("[exec] after-rotate");
+    expect(main).not.toContain("x".repeat(500));
+  });
+
+  it("未超 maxBytes 不轮转，照常追加", () => {
+    const file = tmpLogFile();
+    writeFileSync(file, "small\n");
+    logAgentOps({ toolName: "exec", params: { command: "ls" }, logFile: file, maxBytes: 10_000 });
+    expect(existsSync(`${file}.1`)).toBe(false);
+    expect(readFileSync(file, "utf8")).toContain("small\n");
+    expect(readFileSync(file, "utf8")).toContain("[exec] ls");
+  });
+
+  it("keep 截断：滚动时从大到小 renameSync，删超出 keep 的最老份", () => {
+    const file = tmpLogFile();
+    writeFileSync(file, "MAIN");
+    writeFileSync(`${file}.1`, "OLD1");
+    writeFileSync(`${file}.2`, "OLD2");
+    logAgentOps({ toolName: "exec", params: { command: "ls" }, logFile: file, maxBytes: 1, keep: 2 });
+    expect(readFileSync(`${file}.1`, "utf8")).toBe("MAIN");
+    expect(readFileSync(`${file}.2`, "utf8")).toBe("OLD1");
+    expect(existsSync(`${file}.3`)).toBe(false); // OLD2 滚出 keep=2 窗口被删
+  });
+
+  it("keep 调小后清理历史遗留超序号旧份", () => {
+    const file = tmpLogFile();
+    writeFileSync(file, "MAIN");
+    writeFileSync(`${file}.5`, "LEGACY5");
+    logAgentOps({ toolName: "exec", params: { command: "ls" }, logFile: file, maxBytes: 1, keep: 2 });
+    expect(existsSync(`${file}.5`)).toBe(false);
+  });
+
+  it("轮转失败静默（fail-open：.1 被目录占位致 rm 失败，仍照常写主文件）", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-agentops-rot-bad-"));
+    dirs.push(dir);
+    const file = path.join(dir, "agent-ops.log");
+    writeFileSync(file, "y".repeat(100));
+    mkdirSync(`${file}.1`); // 目录占位：rmSync 无 recursive 会抛 ERR_FS_EISDIR
+    expect(() =>
+      logAgentOps({ toolName: "exec", params: { command: "ls" }, logFile: file, maxBytes: 10, keep: 1 }),
+    ).not.toThrow();
+    expect(readFileSync(file, "utf8")).toContain("[exec] ls");
+  });
+
+  it("日志文件不存在时跳过轮转不报错（首次写入）", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-agentops-rot-new-"));
+    dirs.push(dir);
+    const file = path.join(dir, "agent-ops.log");
+    logAgentOps({ toolName: "exec", params: { command: "ls" }, logFile: file, maxBytes: 10 });
+    expect(readFileSync(file, "utf8")).toContain("[exec] ls");
   });
 });

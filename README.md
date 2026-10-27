@@ -65,6 +65,11 @@ harness_status { }                                        // poll progress / res
 | `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail) |
 | `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
 
+## What's new in v0.4.6
+
+- **Daily ledger report** — a built-in timer aggregates the previous day's ledger (task total / success / failure / success rate / token usage / avg & max duration / up to 5 failure details) and pushes a WeChat-friendly summary via `notifyCommand` at `dailyReport.hour` (default 21:00, Asia/Shanghai). Config: `dailyReport.enabled` (default on) / `dailyReport.hour`. Fail-open throughout; "already sent today" is tracked in memory.
+- **agent-ops log rotation** — before each write the ops log size is checked; when it exceeds `agentOpsLogMaxBytes` (default 10 MB) it rolls `.log → .1 → .2 …` keeping `agentOpsLogKeep` (default 7) files. Rotation failures are silently skipped (fail-open).
+
 ## What's new in v0.4.5
 
 - **agent-ops logging hook** — `before_tool_call` / `after_tool_call` hooks now log agent-layer tool calls (exec / edit / write / apply_patch / harness_run, etc.) to a unified ops log (default `/root/jarvisLogs/jarvis-tools.log`) in jlog format (`[agent-ops] [tool] summary + duration`). exec logs a truncated one-line command, file tools log the path, harness_run logs harness + taskId + status + duration. Read-only tools (read / ls / grep / glob / memory_search) are skipped to control noise. Fully fail-open: logging failures never block tool calls. Configurable via `agentOpsLogEnabled` (default on) and `agentOpsLogFile`.

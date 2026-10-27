@@ -43,6 +43,7 @@ import { buildTurnContext } from "./lib/turnprepare.js";
 import { MetricsSampler } from "./lib/metrics.js";
 import { registerDispatch, bindTaskId, removeEntry, pruneFinished } from "./lib/taskboard-auto.js";
 import { logAgentOps, shouldLogAgentOps } from "./lib/agent-ops-log.js";
+import { registerDailyReport } from "./lib/daily-report.js";
 import { resolvePolicy, resolveRoute } from "./lib/routing.js";
 import {
   orchestrate,
@@ -137,6 +138,28 @@ const configSchema = Type.Object({
   agentOpsLogFile: Type.Optional(
     Type.String({
       description: "v0.4.5 agent 层操作日志文件路径，默认 <dataDir>/agent-ops.log",
+    }),
+  ),
+  agentOpsLogMaxBytes: Type.Optional(
+    Type.Number({
+      description: "v0.4.6 agent-ops 日志轮转阈值字节，默认 10485760（10MB），0=禁用轮转",
+    }),
+  ),
+  agentOpsLogKeep: Type.Optional(
+    Type.Number({
+      description: "v0.4.6 agent-ops 日志轮转保留份数（.1~.N），默认 7",
+    }),
+  ),
+  dailyReport: Type.Optional(
+    Type.Object({
+      enabled: Type.Optional(
+        Type.Boolean({ description: "v0.4.6 台账日报推送开关，默认开启" }),
+      ),
+      hour: Type.Optional(
+        Type.Number({
+          description: "v0.4.6 日报推送时刻（Asia/Shanghai 小时），默认 21 点，到达即发（当日仅一次）",
+        }),
+      ),
     }),
   ),
   routing: Type.Optional(
@@ -833,6 +856,8 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
             result,
             durationMs,
             logFile: agentOpsLogFile,
+            maxBytes: cfg.agentOpsLogMaxBytes ?? 10_485_760,
+            keep: cfg.agentOpsLogKeep ?? 7,
           });
         } catch {
           return; // fail-open：日志失败绝不阻断工具调用
@@ -867,6 +892,20 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
         watchdog.start();
       } catch {
         // 探活启动失败不影响主功能
+      }
+    }
+
+    // v0.4.6 台账日报：每天固定时间（默认 21 点 Asia/Shanghai）聚合昨日数据经 notifyCommand 推送
+    // （内部自带 setInterval，不是 hook，不进 activeHooks）
+    if (cfg.dailyReport?.enabled !== false) {
+      try {
+        registerDailyReport({
+          cfg,
+          ledgerDbPath,
+          notifyCommand: cfg.notifyCommand,
+        });
+      } catch {
+        // 日报启动失败不影响主功能
       }
     }
 

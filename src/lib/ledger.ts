@@ -155,13 +155,13 @@ export function normalizeStatus(s: string): TaskStatus {
   return STATUS_ALIASES[s] ?? (s as TaskStatus);
 }
 
-interface SqlStatement {
+export interface SqlStatement {
   run(...params: unknown[]): unknown;
   all(...params: unknown[]): unknown[];
   get(...params: unknown[]): unknown;
 }
 
-interface SqlDriver {
+export interface SqlDriver {
   exec(sql: string): void;
   prepare(sql: string): SqlStatement;
   close(): void;
@@ -171,8 +171,9 @@ interface SqlDriver {
  * 驱动优先级：node:sqlite（node 22+ 内置，零依赖）→ better-sqlite3（动态加载，
  * 仅当运行时 node:sqlite 不可用时才需要显式安装该依赖）。
  * 用 createRequire 同步加载：保证 append 在同步代码路径（cli runner）里立即落盘。
+ * v0.4.6 导出复用：daily-report 日报聚合用同一驱动打开台账只读查询。
  */
-function openDriverSync(dbPath: string): SqlDriver {
+export function openDriverSync(dbPath: string): SqlDriver {
   const require = createRequire(import.meta.url);
   try {
     const { DatabaseSync } = require("node:sqlite") as {

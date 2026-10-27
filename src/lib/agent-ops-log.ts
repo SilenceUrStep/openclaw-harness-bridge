@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { expandHome } from "./adapters.js";
 
@@ -8,7 +8,8 @@ import { expandHome } from "./adapters.js";
  *
  * 格式对齐 jlog：`YYYY-MM-DD HH:mm:ss.SSS [INFO] [agent-ops] [工具名] 摘要`（北京时间 Asia/Shanghai）。
  * 只读工具（read/ls/grep/memory_search 等）跳过不记，控制噪音。
- * 全链路 fail-open：写日志失败静默吞掉，绝不阻断工具调用主流程。
+ * v0.4.6 日志轮转：写入前检查文件大小，超 maxBytes 滚动（.log → .1 → .2 …），最多保留 keep 份。
+ * 全链路 fail-open：写日志/轮转失败静默吞掉，绝不阻断工具调用主流程。
  */
 
 /** 只读工具名单：调用频繁且观测价值低，跳过不记 */
@@ -88,8 +89,36 @@ export function shouldLogAgentOps(toolName: string): boolean {
 }
 
 /**
+ * v0.4.6 日志轮转：主文件超 maxBytes 时滚动（.log → .1，原 .1→.2 … 从大到小 renameSync 循环），
+ * 删超出 keep 的旧份（含历史遗留的更大序号）。文件不存在 / 轮转失败静默跳过（fail-open），
+ * 主文件照常写入。
+ */
+function rotateAgentOpsLog(file: string, maxBytes: number, keep: number): void {
+  try {
+    if (statSync(file).size <= maxBytes) return;
+    for (let i = keep; i >= 1; i--) {
+      const src = `${file}.${i}`;
+      if (!existsSync(src)) continue;
+      if (i >= keep) {
+        rmSync(src, { force: true }); // 最老一份滚动出保留窗口，直接删
+      } else {
+        renameSync(src, `${file}.${i + 1}`);
+      }
+    }
+    // 历史遗留的超序号旧份（keep 调小过）一并清掉
+    for (let i = keep + 1; i <= keep + 10; i++) {
+      rmSync(`${file}.${i}`, { force: true });
+    }
+    renameSync(file, `${file}.1`);
+  } catch {
+    // fail-open：轮转失败照常写入主文件
+  }
+}
+
+/**
  * 记录一条 agent 层工具调用日志（追加写入，失败静默吞掉）。
  * 工具抛错时把错误包成 { error } 传进 result 即可记 [ERROR] 级别。
+ * v0.4.6 传入 maxBytes（字节）启用写入前轮转，keep 为保留份数（默认 7）。
  */
 export function logAgentOps(opts: {
   toolName: string;
@@ -97,6 +126,8 @@ export function logAgentOps(opts: {
   result?: unknown;
   durationMs?: number;
   logFile: string;
+  maxBytes?: number;
+  keep?: number;
 }): void {
   try {
     const toolName = String(opts.toolName ?? "").trim();
@@ -121,6 +152,10 @@ export function logAgentOps(opts: {
     const line = `${beijingTimestamp()} [${level}] [agent-ops] [${toolName}] ${summary}\n`;
     const file = expandHome(opts.logFile);
     mkdirSync(path.dirname(file), { recursive: true });
+    // v0.4.6 写入前轮转：超 maxBytes 滚动旧内容到 .1（未传 maxBytes 不轮转，行为同 v0.4.5）
+    if (opts.maxBytes != null && opts.maxBytes > 0) {
+      rotateAgentOpsLog(file, opts.maxBytes, opts.keep ?? 7);
+    }
     appendFileSync(file, line, "utf8");
   } catch {
     // fail-open：日志失败绝不抛错，不影响工具调用主流程
