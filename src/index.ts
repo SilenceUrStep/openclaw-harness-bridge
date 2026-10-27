@@ -136,7 +136,7 @@ const configSchema = Type.Object({
   ),
   agentOpsLogFile: Type.Optional(
     Type.String({
-      description: "v0.4.5 agent 层操作日志文件路径，默认 /root/jarvisLogs/jarvis-tools.log",
+      description: "v0.4.5 agent 层操作日志文件路径，默认 <dataDir>/agent-ops.log",
     }),
   ),
   routing: Type.Optional(
@@ -809,7 +809,7 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
     // v0.4.5 agent-ops 日志：agent 层工具调用自动打进统一日志，治「agent 层操作无自动日志」缺口
     if (cfg.agentOpsLogEnabled !== false) {
       activeHooks.push("agent_ops_log");
-      const agentOpsLogFile = cfg.agentOpsLogFile ?? "/root/jarvisLogs/jarvis-tools.log";
+      const agentOpsLogFile = cfg.agentOpsLogFile ?? path.join(dataDir, "agent-ops.log");
       /** toolCallId → 开始时间（仅需计时的工具：非只读即记） */
       const agentOpsTimers = new Map<string, number>();
       api.on("before_tool_call", async (event) => {

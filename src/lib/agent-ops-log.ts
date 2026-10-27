@@ -4,7 +4,7 @@ import { expandHome } from "./adapters.js";
 
 /**
  * v0.4.5 agent-ops 日志：把 agent 层工具调用（exec/edit/write/apply_patch/harness_run 等）
- * 自动打进统一日志（默认 /root/jarvisLogs/jarvis-tools.log），治「agent 层操作无自动日志」缺口。
+ * 自动打进统一日志（默认 <dataDir>/agent-ops.log），治「agent 层操作无自动日志」缺口。
  *
  * 格式对齐 jlog：`YYYY-MM-DD HH:mm:ss.SSS [INFO] [agent-ops] [工具名] 摘要`（北京时间 Asia/Shanghai）。
  * 只读工具（read/ls/grep/memory_search 等）跳过不记，控制噪音。

@@ -143,7 +143,7 @@ export interface BridgeConfig {
   timeouts?: RunTimeoutsConfig;
   /** v0.4.5 agent 层操作日志开关（默认开启，false 关闭） */
   agentOpsLogEnabled?: boolean;
-  /** v0.4.5 agent 层操作日志文件路径，默认 /root/jarvisLogs/jarvis-tools.log */
+  /** v0.4.5 agent 层操作日志文件路径，默认 <dataDir>/agent-ops.log */
   agentOpsLogFile?: string;
 }
 

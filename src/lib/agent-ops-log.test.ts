@@ -19,7 +19,7 @@ afterAll(() => {
 function tmpLogFile(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "hb-agentops-"));
   dirs.push(dir);
-  const file = path.join(dir, "jarvis-tools.log");
+  const file = path.join(dir, "agent-ops.log");
   writeFileSync(file, "");
   return file;
 }
