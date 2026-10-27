@@ -42,6 +42,7 @@ import { appendStatusLine, buildStatusLine } from "./lib/statusline.js";
 import { buildTurnContext } from "./lib/turnprepare.js";
 import { MetricsSampler } from "./lib/metrics.js";
 import { registerDispatch, bindTaskId, removeEntry, pruneFinished } from "./lib/taskboard-auto.js";
+import { logAgentOps, shouldLogAgentOps } from "./lib/agent-ops-log.js";
 import { resolvePolicy, resolveRoute } from "./lib/routing.js";
 import {
   orchestrate,
@@ -126,6 +127,16 @@ const configSchema = Type.Object({
   eventRetentionDays: Type.Optional(
     Type.Number({
       description: "v0.4.1 task_event 事件流水保留天数，默认 30，0 表示不清理",
+    }),
+  ),
+  agentOpsLogEnabled: Type.Optional(
+    Type.Boolean({
+      description: "v0.4.5 agent 层操作日志：exec/edit/harness_run 等自动打进统一日志（默认开启）",
+    }),
+  ),
+  agentOpsLogFile: Type.Optional(
+    Type.String({
+      description: "v0.4.5 agent 层操作日志文件路径，默认 /root/jarvisLogs/jarvis-tools.log",
     }),
   ),
   routing: Type.Optional(
@@ -791,6 +802,40 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
           }
         } catch {
           return; // fail-open
+        }
+      });
+    }
+
+    // v0.4.5 agent-ops 日志：agent 层工具调用自动打进统一日志，治「agent 层操作无自动日志」缺口
+    if (cfg.agentOpsLogEnabled !== false) {
+      activeHooks.push("agent_ops_log");
+      const agentOpsLogFile = cfg.agentOpsLogFile ?? "/root/jarvisLogs/jarvis-tools.log";
+      /** toolCallId → 开始时间（仅需计时的工具：非只读即记） */
+      const agentOpsTimers = new Map<string, number>();
+      api.on("before_tool_call", async (event) => {
+        try {
+          if (!event.toolCallId || !shouldLogAgentOps(event.toolName)) return;
+          agentOpsTimers.set(event.toolCallId, Date.now());
+        } catch {
+          return; // fail-open
+        }
+      });
+      api.on("after_tool_call", async (event) => {
+        try {
+          const start = event.toolCallId ? agentOpsTimers.get(event.toolCallId) : undefined;
+          if (event.toolCallId) agentOpsTimers.delete(event.toolCallId); // 用完即删，防泄漏
+          const durationMs = start !== undefined ? Date.now() - start : undefined;
+          // 工具抛错时宿主把错误放 event.error，包成 { error } 传给日志记 [ERROR]
+          const result = event.error !== undefined ? { error: event.error } : event.result;
+          logAgentOps({
+            toolName: event.toolName,
+            params: event.params,
+            result,
+            durationMs,
+            logFile: agentOpsLogFile,
+          });
+        } catch {
+          return; // fail-open：日志失败绝不阻断工具调用
         }
       });
     }

@@ -141,6 +141,10 @@ export interface BridgeConfig {
   healthWatchdog?: WatchdogConfig;
   /** http 任务超时两级判定（idleTimeoutMs/maxDurationMs/sessionCheckMaxRetries） */
   timeouts?: RunTimeoutsConfig;
+  /** v0.4.5 agent 层操作日志开关（默认开启，false 关闭） */
+  agentOpsLogEnabled?: boolean;
+  /** v0.4.5 agent 层操作日志文件路径，默认 /root/jarvisLogs/jarvis-tools.log */
+  agentOpsLogFile?: string;
 }
 
 export function expandHome(p: string): string {
