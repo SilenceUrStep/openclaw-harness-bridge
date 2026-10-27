@@ -65,6 +65,11 @@ harness_status { }                                        // poll progress / res
 | `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail) |
 | `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
 
+## What's new in v0.4.5
+
+- **agent-ops logging hook** — `before_tool_call` / `after_tool_call` hooks now log agent-layer tool calls (exec / edit / write / apply_patch / harness_run, etc.) to a unified ops log (default `/root/jarvisLogs/jarvis-tools.log`) in jlog format (`[agent-ops] [tool] summary + duration`). exec logs a truncated one-line command, file tools log the path, harness_run logs harness + taskId + status + duration. Read-only tools (read / ls / grep / glob / memory_search) are skipped to control noise. Fully fail-open: logging failures never block tool calls. Configurable via `agentOpsLogEnabled` (default on) and `agentOpsLogFile`.
+- **dsh adapter sdk config fix** — the built-in dsh adapter shipped `sdk.provider = deepseek-official` while `modelSync` injects a `tokenhub` provider; the mismatch was masked by `DSH_PROVIDER` / `DSH_MODEL` env vars and surfaced as `initialize` failures (`paths[0] undefined`) once the gateway restarted without them. The sdk config now matches the modelSync provider (`tokenhub` / `glm-5.3-flash`).
+
 ## What's new in v0.4.4
 
 - **taskType-aware default timeout** — when `timeoutMs` is omitted, the default is resolved per `taskType`: coding → 45 min, general/analysis/search → 10 min, none → 10 min (previous behavior). Overridable via `defaultTimeoutByTaskType` config. The effective value and its source (`explicit` / `taskType_default` / `global_default`) are recorded on the task row (`timeout_ms` / `timeout_source`) plus a `timeout_resolved` ledger event. Resolution is unified across cli / dsh / http transports.
