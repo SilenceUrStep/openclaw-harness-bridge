@@ -391,6 +391,8 @@ export interface HttpRunOptions {
   /** fork-before-retry：先 fork 源会话再续跑，原会话历史不被污染 */
   forkFromSessionId?: string;
   cwd?: string;
+  /** v0.4.8 worktree 隔离：显式指定任务 ID（worktree 分支/目录名与之一致），缺省自动生成 */
+  taskId?: string;
   wait: boolean;
   /** 旧版总时长超时（保留映射兼容）：未显式传 maxDurationMs 时作为总时长兜底 */
   timeoutMs: number;
@@ -420,7 +422,7 @@ export interface HttpRunOptions {
  * wait=true 返回终态记录；wait=false 后台执行并立即返回运行中快照。
  */
 export async function runHttpTask(opts: HttpRunOptions): Promise<TaskRecord> {
-  const id = newTaskId();
+  const id = opts.taskId ?? newTaskId();
   const startedAt = new Date().toISOString();
   const logFile = path.join(opts.tasksDir, `${id}.log`);
   const base: TaskRecord = {

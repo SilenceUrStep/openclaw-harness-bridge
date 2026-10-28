@@ -6,15 +6,17 @@ import { diagnoseBinary } from "./diagnose.js";
 import { openDriverSync } from "./ledger.js";
 import { probeAllAdapters, type AdapterStatus } from "./health.js";
 import { detectHostVersion, type HostVersionApi } from "./selfcheck.js";
+import { listWorktreeTaskIds, worktreeDir } from "./worktree.js";
 
 /**
- * v0.4.7 一键体检（harness_doctor）：五项检查收口成一个工具，输出人话体检报告——
+ * v0.4.7 一键体检（harness_doctor）：检查项收口成一个工具，输出人话体检报告——
  * 每项一行结论 + ✅/⚠️/❌ 分级 + 异常项修复建议：
  *   1. adapter 探活健康（复用 harness_list 的 probeAllAdapters，一轮探测共用）
  *   2. 宿主与 binary 版本探测
  *   3. binary 诊断（PATH、悬空符号链接线索，同 harness_list healthDetail 的 diagnoseBinary）
  *   4. 台账健康（SQLite 完整性 / WAL 大小 / 任务状态统计）
- *   5. 配置校验（全部配置键当前值 vs 默认值对比；全部键均有默认值，不配置也能跑）
+ *   5. worktree 残留（v0.4.8：已结束任务遗留的 worktree 目录清单，供人工清理）
+ *   6. 配置校验（全部配置键当前值 vs 默认值对比；全部键均有默认值，不配置也能跑）
  * 只做只读探测，绝不执行任何 harness binary；单项检查失败不拖垮整个报告（fail-open）。
  */
 
@@ -233,7 +235,79 @@ export function checkLedgerHealth(cfg: BridgeConfig): DoctorCheck {
   }
 }
 
-/* ---------------- 检查 5：配置校验（当前值 vs 默认值） ---------------- */
+/* ---------------- 检查 5：worktree 残留（v0.4.8） ---------------- */
+
+/**
+ * worktree 残留检查：worktree 生命周期设计为「任务结束后保留，人工审查合并后清理」，
+ * 本检查列出 <dataDir>/worktrees/ 下所有任务目录并对照台账任务状态：
+ * 非运行中（或查不到状态）的目录即残留，warn 提示清理命令；只有运行中任务的 → ok。
+ */
+export function checkWorktreeResidue(cfg: BridgeConfig): DoctorCheck {
+  const dataDir = resolveDataDir(cfg);
+  const dirNames = listWorktreeTaskIds(dataDir);
+  if (dirNames.length === 0) {
+    return { name: "worktree 残留", level: "ok", summary: "无 worktree 残留（<dataDir>/worktrees/ 为空或不存在）" };
+  }
+  // 目录名 → 台账任务（目录名 = taskId 去 hb_ 前缀；台账打不开时全部视为状态未知）
+  const infoByDir = new Map<string, { taskId: string; status: string }>();
+  for (const name of dirNames) infoByDir.set(name, { taskId: name, status: "未知" });
+  try {
+    const db = openDriverSync(path.join(dataDir, "ledger.db"));
+    try {
+      db.exec("PRAGMA busy_timeout=2000");
+      for (const name of dirNames) {
+        try {
+          const row = db
+            .prepare("SELECT id, status FROM task WHERE id = ? OR id = ? LIMIT 1")
+            .get(`hb_${name}`, name) as { id?: unknown; status?: unknown } | undefined;
+          if (row?.status != null) {
+            infoByDir.set(name, { taskId: String(row.id ?? `hb_${name}`), status: String(row.status) });
+          }
+        } catch {
+          // 单条查询失败保持「未知」
+        }
+      }
+    } finally {
+      try {
+        db.close();
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // 台账打不开 → 状态全部未知，仍按残留提示（保守）
+  }
+  const residue: string[] = [];
+  const residueDirs: string[] = [];
+  const active: string[] = [];
+  for (const name of dirNames) {
+    const info = infoByDir.get(name) ?? { taskId: name, status: "未知" };
+    const line = `${info.taskId}（${info.status}）: ${path.join(worktreeDir(dataDir), name)}`;
+    if (info.status === "running") active.push(line);
+    else {
+      residue.push(line);
+      residueDirs.push(name);
+    }
+  }
+  const cleanup = (dirName: string): string =>
+    `git worktree remove ${path.join(worktreeDir(dataDir), dirName)}；分支已合并不再需要时 git branch -d hb-wt/hb_${dirName}（未合并需 -D）`;
+  if (residue.length === 0) {
+    return {
+      name: "worktree 残留",
+      level: "ok",
+      summary: `${dirNames.length} 个 worktree 全部对应运行中任务（使用中，无残留）`,
+      detail: active.join("\n"),
+    };
+  }
+  return {
+    name: "worktree 残留",
+    level: "warn",
+    summary: `${residue.length} 个残留 worktree（任务已结束，产出在 hb-wt/* 分支上待人工审查合并）${active.length > 0 ? `；另有 ${active.length} 个使用中` : ""}`,
+    detail: `残留清单:\n${residue.map((l) => `- ${l}`).join("\n")}\n建议: 确认产出已合并后清理（主仓库内执行）\n${residueDirs.map(cleanup).join("\n")}`,
+  };
+}
+
+/* ---------------- 检查 6：配置校验（当前值 vs 默认值） ---------------- */
 
 export interface ConfigKeyInfo {
   key: string;
@@ -272,6 +346,10 @@ export const CONFIG_KEY_TABLE: ConfigKeyInfo[] = [
   { key: "timeouts.idleTimeoutMs", defaultValue: "300000", description: "http SSE 静默核查阈值毫秒（0=禁用）", get: (c) => c.timeouts?.idleTimeoutMs },
   { key: "timeouts.maxDurationMs", defaultValue: "7200000", description: "http 总时长兜底毫秒（0=禁用）", get: (c) => c.timeouts?.maxDurationMs },
   { key: "timeouts.sessionCheckMaxRetries", defaultValue: "3", description: "连续核查仍 running 的告警阈值次数", get: (c) => c.timeouts?.sessionCheckMaxRetries },
+  { key: "worktree.enabled", defaultValue: "false", description: "v0.4.8 worktree 隔离开关（开启后 harness_run worktree=true 才生效）", get: (c) => c.worktree?.enabled },
+  { key: "doctorSchedule.enabled", defaultValue: "true", description: "v0.4.8 doctor 定时体检开关", get: (c) => c.doctorSchedule?.enabled },
+  { key: "doctorSchedule.hour", defaultValue: "8", description: "v0.4.8 体检时刻（Asia/Shanghai 小时）", get: (c) => c.doctorSchedule?.hour },
+  { key: "hostVersionOverride", defaultValue: "(none — 特性检测自动探测)", description: "v0.4.8 宿主版本覆盖（旧宿主无版本 API 时直接采用该值）", get: (c) => c.hostVersionOverride },
 ];
 
 export function checkConfigHealth(cfg: BridgeConfig): DoctorCheck {
@@ -316,7 +394,7 @@ export interface DoctorOptions {
   api?: HostVersionApi;
 }
 
-/** 一键体检：五项检查收口，单项失败 fail-open（该项标 error，不拖垮整个报告） */
+/** 一键体检：检查项收口，单项失败 fail-open（该项标 error，不拖垮整个报告） */
 export async function runDoctor(cfg: BridgeConfig, opts: DoctorOptions = {}): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
 
@@ -338,7 +416,7 @@ export async function runDoctor(cfg: BridgeConfig, opts: DoctorOptions = {}): Pr
   // 宿主版本（与 binary 版本并列展示在「版本探测」之外，单独一行）
   let hostVersion = "unknown";
   try {
-    hostVersion = await detectHostVersion(opts.api);
+    hostVersion = await detectHostVersion(opts.api, cfg.hostVersionOverride);
   } catch {
     // 保持 unknown
   }
@@ -347,7 +425,7 @@ export async function runDoctor(cfg: BridgeConfig, opts: DoctorOptions = {}): Pr
     level: hostVersion === "unknown" ? "warn" : "ok",
     summary: hostVersion === "unknown" ? "宿主版本探测不可用（特性检测全回落）" : `宿主 ${hostVersion}`,
     ...(hostVersion === "unknown"
-      ? { detail: "建议: 忽略（旧版宿主不导出版本 API）；或设置 OPENCLAW_VERSION 环境变量" }
+      ? { detail: "建议: 忽略（旧版宿主不导出版本 API）；或设置 hostVersionOverride 配置 / OPENCLAW_VERSION 环境变量" }
       : {}),
   });
 
@@ -362,7 +440,18 @@ export async function runDoctor(cfg: BridgeConfig, opts: DoctorOptions = {}): Pr
     });
   }
 
-  // 5) 配置校验
+  // 5) worktree 残留（v0.4.8，fail-open）
+  try {
+    checks.push(checkWorktreeResidue(cfg));
+  } catch (err) {
+    checks.push({
+      name: "worktree 残留",
+      level: "warn",
+      summary: `worktree 检查异常: ${(err as Error).message}`,
+    });
+  }
+
+  // 6) 配置校验
   try {
     checks.push(checkConfigHealth(cfg));
   } catch (err) {

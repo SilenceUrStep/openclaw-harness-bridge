@@ -11,7 +11,7 @@ the same source the `harness_doctor` config check uses (`src/lib/doctor.ts → C
 | `dataDir` | `~/.openclaw/harness-bridge` | Data directory (SQLite ledger / task logs / user adapters) |
 | `adaptersDir` | `<dataDir>/adapters` | Extra adapter directory (same-name file overrides a built-in) |
 | `paramsFile` | built-in `params/model_params.json` | Model parameter dictionary JSON path |
-| `notifyCommand` | *(none — alert & daily-report push disabled, everything else runs)* | Shell command executed on task finish / alerts. v0.4.7 event types: `task_failed` (default) / `task_success` / `task_stall` / `health_change` / `selfcheck` / `daily_report` |
+| `notifyCommand` | *(none — alert & daily-report push disabled, everything else runs)* | Shell command executed on task finish / alerts. v0.4.8 event types: `task_failed` (default) / `task_success` / `task_stall` / `health_change` / `selfcheck` / `daily_report` / `doctor_report` |
 | `defaultTimeoutMs` | `600000` | Default `harness_run` timeout ms (when no taskType applies) |
 | `defaultTimeoutByTaskType` | `{coding: 2700000, general/analysis/search: 600000}` | taskType → default timeout ms map (overrides built-ins when `timeoutMs` omitted) |
 | `globalWorkspace` | *(none — serve process cwd is used)* | v0.4.4 fallback workspace when `harness_run` omits `cwd` |
@@ -36,6 +36,10 @@ the same source the `harness_doctor` config check uses (`src/lib/doctor.ts → C
 | `timeouts.idleTimeoutMs` | `300000` | v0.4.3 HTTP SSE idle-silence check threshold ms (`0` disables) |
 | `timeouts.maxDurationMs` | `7200000` | v0.4.3 HTTP total-duration backstop ms (`0` disables); check-then-settle, never a blind kill |
 | `timeouts.sessionCheckMaxRetries` | `3` | v0.4.3 consecutive still-running checks before a stall alert |
+| `worktree.enabled` | `false` | v0.4.8 allow `harness_run` `worktree=true` to run the task in an isolated git worktree (`<dataDir>/worktrees/<taskId>`, branch `hb-wt/<taskId>`); `false` degrades to normal execution with a ledger event |
+| `doctorSchedule.enabled` | `true` | v0.4.8 scheduled doctor run (v0.4.7 checks on a daily timer); error-level findings push `HB_ALERT=doctor_report` via `notifyCommand`, green/warn-only runs stay ledger-only |
+| `doctorSchedule.hour` | `8` | v0.4.8 doctor schedule hour (Asia/Shanghai), once per day |
+| `hostVersionOverride` | *(none — auto-detect via api / `OPENCLAW_VERSION` env / `openclaw` package.json)* | v0.4.8 pin the host version reported by self-check / doctor, skipping the feature-detect fallback chain (for hosts without a version API) |
 
 Adapter credentials are not plugin config: e.g. the OpenCode HTTP transport reads
 `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` from the gateway environment.

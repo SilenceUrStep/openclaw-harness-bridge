@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
 import {
   checkConfigHealth,
   checkLedgerHealth,
+  checkWorktreeResidue,
   formatBytes,
   renderDoctorReport,
   runDoctor,
@@ -9,6 +13,18 @@ import {
 } from "./doctor.js";
 import type { AdapterStatus } from "./health.js";
 import type { BridgeConfig } from "./adapters.js";
+
+const dirs: string[] = [];
+
+afterAll(() => {
+  for (const d of dirs) {
+    try {
+      rmSync(d, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+});
 
 function status(partial: Partial<AdapterStatus>): AdapterStatus {
   return {
@@ -82,7 +98,7 @@ describe("doctor adapter 检查（v0.4.7）", () => {
     });
     expect(report.checks[0].level).toBe("error");
     expect(report.checks[0].summary).toContain("boom");
-    expect(report.checks).toHaveLength(6); // 3 adapter 项 + 宿主 + 台账 + 配置
+    expect(report.checks).toHaveLength(7); // 3 adapter 项 + 宿主 + 台账 + worktree 残留 + 配置
   });
 });
 
@@ -152,6 +168,67 @@ describe("doctor 配置校验（v0.4.7）", () => {
   it("notifyCommand 已配置 → 无 warn（其余键均有默认）", () => {
     const check = checkConfigHealth({ notifyCommand: "bash hb_notify.sh" } as BridgeConfig);
     expect(check.level).toBe("ok");
+  });
+});
+
+describe("doctor worktree 残留检查（v0.4.8）", () => {
+  it("无 worktree 目录 → ok 无残留", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-doc-wt-"));
+    dirs.push(dir);
+    const check = checkWorktreeResidue({ dataDir: dir } as BridgeConfig);
+    expect(check.level).toBe("ok");
+    expect(check.summary).toContain("无 worktree 残留");
+  });
+
+  it("已结束任务的 worktree → warn 清单 + 清理建议（目录名映射回 hb_ 任务 ID）", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-doc-wt-"));
+    dirs.push(dir);
+    mkdirSync(path.join(dir, "worktrees", "20260101T000000Z_ab12"), { recursive: true });
+    const { openLedgerAt, closeAllLedgers } = await import("./ledger.js");
+    const ledger = openLedgerAt(path.join(dir, "ledger.db"));
+    ledger.append({ id: "hb_20260101T000000Z_ab12", harness: "opencode", status: "success" });
+    await ledger.close();
+    await closeAllLedgers();
+    const check = checkWorktreeResidue({ dataDir: dir } as BridgeConfig);
+    expect(check.level).toBe("warn");
+    expect(check.summary).toContain("1 个残留 worktree");
+    expect(check.detail).toContain("hb_20260101T000000Z_ab12（success）");
+    expect(check.detail).toContain("git worktree remove");
+    expect(check.detail).toContain("git branch -d hb-wt/hb_20260101T000000Z_ab12");
+  });
+
+  it("仅运行中任务的 worktree → ok 使用中", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-doc-wt-"));
+    dirs.push(dir);
+    mkdirSync(path.join(dir, "worktrees", "20260101T000000Z_cd34"), { recursive: true });
+    const { openLedgerAt, closeAllLedgers } = await import("./ledger.js");
+    const ledger = openLedgerAt(path.join(dir, "ledger.db"));
+    ledger.append({ id: "hb_20260101T000000Z_cd34", harness: "opencode", status: "running" });
+    await ledger.close();
+    await closeAllLedgers();
+    const check = checkWorktreeResidue({ dataDir: dir } as BridgeConfig);
+    expect(check.level).toBe("ok");
+    expect(check.summary).toContain("使用中");
+  });
+
+  it("台账查不到任务状态（无表）→ 保守按残留 warn", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-doc-wt-"));
+    dirs.push(dir);
+    mkdirSync(path.join(dir, "worktrees", "orphan_dir"), { recursive: true });
+    const check = checkWorktreeResidue({ dataDir: dir } as BridgeConfig);
+    expect(check.level).toBe("warn");
+    expect(check.detail).toContain("orphan_dir（未知）");
+  });
+});
+
+describe("doctor hostVersionOverride（v0.4.8）", () => {
+  it("配置覆盖 → 宿主版本检查直接采用该值（跳过特性检测）", async () => {
+    const report = await runDoctor({ hostVersionOverride: "2026.7.1-2" } as BridgeConfig, {
+      probe: async () => [status({})],
+    });
+    const host = report.checks.find((c) => c.name === "宿主版本");
+    expect(host?.level).toBe("ok");
+    expect(host?.summary).toBe("宿主 2026.7.1-2");
   });
 });
 

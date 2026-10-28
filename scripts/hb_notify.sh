@@ -14,6 +14,7 @@
 #   health_change:         HB_ADAPTER / HB_STATE / HB_PREV_STATE / HB_DETAIL / HB_TIME
 #   selfcheck:             HB_SELFCHECK / HB_HOST_VERSION / HB_DETAIL / HB_TIME
 #   daily_report:          HB_NOTIFY (report text) / HB_REPORT_DATE (v0.4.7 ledger daily report)
+#   doctor_report:         HB_DETAIL (anomaly digest) / HB_TIME (v0.4.8 scheduled doctor check)
 # v0.4.7: every alert carries a source marker ([harness告警·type]); bare `?` fallbacks replaced
 # with explicit placeholders; task_failed always renders fail reason + absolute log path +
 # follow-up hint; suppressed alerts list the suppressed task ids, not just a count.
@@ -29,6 +30,11 @@ case "$ALERT" in
   daily_report)
     MSG="[harness日报] ${HB_REPORT_DATE:-(unknown date)}
 ${HB_NOTIFY:-(no report content)}"
+    ;;
+  doctor_report)
+    MSG="[harness体检] 定时体检发现异常项
+${HB_DETAIL:-(no detail)}
+时间: ${HB_TIME:-(unknown time)}"
     ;;
   selfcheck)
     MSG="[harness告警·selfcheck] 宿主 ${HB_HOST_VERSION:-(unknown host version)}

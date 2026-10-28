@@ -63,11 +63,19 @@ harness_status { }                                        // poll progress / res
 | Tool | Purpose |
 |------|---------|
 | `harness_list` | List registered harnesses and their health (binary / version / config-file presence) |
-| `harness_doctor` | v0.4.7 one-shot health report: adapter probes / host & binary versions / binary diagnostics (PATH, dangling symlinks) / ledger health (SQLite integrity, WAL size, task stats) / config audit (current value vs default for every key); ✅/⚠️/❌ graded with fix hints |
+| `harness_doctor` | v0.4.7 one-shot health report (v0.4.8 adds a worktree-residue check): adapter probes / host & binary versions / binary diagnostics (PATH, dangling symlinks) / ledger health (SQLite integrity, WAL size, task stats) / worktree residue / config audit (current value vs default for every key); ✅/⚠️/❌ graded with fix hints |
 | `harness_sync_models` | Calibrate each harness's model config against a shared parameter dictionary (report / field-level merge write-back / default-model switch) |
-| `harness_run` | Delegate a task (background + ledger by default; `wait=true` for synchronous runs) |
-| `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail); v0.4.7 summary mode on by default (one line per task: taskId / harness / status / duration / cost), `summary=false` for the raw JSON |
+| `harness_run` | Delegate a task (background + ledger by default; `wait=true` for synchronous runs; v0.4.8 `worktree=true` runs in an isolated git worktree on branch `hb-wt/<taskId>`) |
+| `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail); v0.4.7 summary mode on by default (one line per task: taskId / harness / status / duration / cost), `summary=false` for the raw JSON; v0.4.8 includes a worktree hint for worktree-isolated tasks |
 | `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
+
+## What's new in v0.4.8
+
+- **Worktree isolation** — `harness_run` accepts `worktree=true`: the task runs in a dedicated git worktree (`<dataDir>/worktrees/<taskId>`, branch `hb-wt/<taskId>` created from HEAD). Non-git workspaces or a disabled `worktree.enabled` degrade gracefully to normal execution with a ledger event explaining why. Worktrees are kept after the task ends (output lands on the `hb-wt/<taskId>` branch for human merge review); `harness_status` carries a worktree hint and `harness_doctor` gains a residue check listing leftovers for manual cleanup (`git worktree remove`).
+- **Scheduled doctor** — the v0.4.7 health check now runs on a daily timer (`doctorSchedule.enabled`, default on; `doctorSchedule.hour`, default 8 Asia/Shanghai). Any error-level check pushes `HB_ALERT=doctor_report` via `notifyCommand` (rendered as `[harness体检]`); all-green or warn-only results only write a ledger event. Pushed once per day.
+- **Lost-task sweeper** — gateway restarts used to leave `status=running` rows forever. On startup and every hour the plugin scans running tasks, checks the pid via `process.kill(pid, 0)`, and marks dead ones as `lost` with a `lost_sweep` ledger event (taskId / pid / last activity). Complements the existing query-time judgment in `harness_status`.
+- **Daily report cost line** — the daily report now includes a `成本：$X` line (summed `cost_total`/`cost` within the yesterday window) next to the token usage line. Window-scoped statistics (only tasks created the day before the report date) verified by tests; days with no tasks render 「昨日无任务」.
+- **`hostVersionOverride`** — new optional config string: when set, self-check and doctor host-version detection use it directly, skipping the feature-detect fallback chain. Useful on hosts without a version API (e.g. 2026.7.1-2).
 
 ## What's new in v0.4.7
 
@@ -202,6 +210,9 @@ the same table `harness_doctor` audits against. Quick reference:
 | `healthWatchdog.enabled` / `healthWatchdog.intervalMs` | `true` / 300000 | v0.4.3 — periodic health probing |
 | `routing.*` | retry 1 (when the section exists) | v0.4.3 — routing rules / fallback chains / retry |
 | `timeouts.idleTimeoutMs` / `maxDurationMs` / `sessionCheckMaxRetries` | 300000 / 7200000 / 3 | v0.4.3 — HTTP two-level timeout |
+| `worktree.enabled` | `false` | v0.4.8 — allow `harness_run` `worktree=true` to run tasks in an isolated git worktree |
+| `doctorSchedule.enabled` / `doctorSchedule.hour` | `true` / 8 | v0.4.8 — scheduled doctor run (error-level findings push `doctor_report`) |
+| `hostVersionOverride` | none | v0.4.8 — pin the host version reported by self-check / doctor (skips auto-detect) |
 
 ## Alert channels
 
@@ -221,10 +232,11 @@ Machine-specific values are injected via env (never hardcoded in the script): `H
 | `health_change` | Watchdog health state transition | `HB_ADAPTER` `HB_STATE` `HB_PREV_STATE` `HB_DETAIL` `HB_TIME` |
 | `selfcheck` | Post-upgrade smoke self-check report | `HB_SELFCHECK` `HB_HOST_VERSION` `HB_DETAIL` `HB_TIME` |
 | `daily_report` | v0.4.7 — ledger daily report (pushed by the built-in timer) | `HB_NOTIFY` (report text) `HB_REPORT_DATE` |
+| `doctor_report` | v0.4.8 — scheduled doctor found error-level checks (once per day; green/warn-only runs stay ledger-only) | `HB_DETAIL` (anomaly digest) `HB_TIME` |
 
 v0.4.7 rendering contract (bundled script): every alert title carries a source marker —
 `[harness告警·task-failed]` / `[harness告警·stall]` / `[harness告警·watchdog]` /
-`[harness告警·selfcheck]` / `[harness通知·task-success]` / `[harness日报]`; unset variables
+`[harness告警·selfcheck]` / `[harness通知·task-success]` / `[harness日报]` / `[harness体检]`; unset variables
 render as explicit placeholders (`(no task id)`, `no exit code (startup failure)`, …) instead
 of a bare `?`; `task_failed` always includes the fail reason, the absolute log path and a
 `详情: harness_status taskId=xxx` follow-up hint; suppressed alerts list the suppressed task

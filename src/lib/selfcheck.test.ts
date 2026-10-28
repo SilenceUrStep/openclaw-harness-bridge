@@ -60,6 +60,17 @@ describe("detectHostVersion（v0.4.3 特性检测）", () => {
     expect(typeof v).toBe("string");
     expect(v.length).toBeGreaterThan(0);
   });
+
+  it("v0.4.8 hostVersionOverride 最高优先：覆盖 api 字段（旧宿主无版本 API 时用）", async () => {
+    expect(
+      await detectHostVersion({ openclawVersion: "2026.9.4" }, "2026.7.1-2"),
+    ).toBe("2026.7.1-2");
+  });
+
+  it("v0.4.8 override 为空串/纯空白 → 回落特性检测", async () => {
+    expect(await detectHostVersion({ openclawVersion: "2026.9.4" }, "")).toBe("2026.9.4");
+    expect(await detectHostVersion({ openclawVersion: "2026.9.4" }, "   ")).toBe("2026.9.4");
+  });
 });
 
 describe("host-state.json（版本基线）", () => {

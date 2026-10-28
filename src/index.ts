@@ -39,12 +39,15 @@ import {
 import { loadParamDict } from "./lib/params.js";
 import { switchDefaultModel, syncAdapterModels, syncDshPatch, switchDshDefaultModel } from "./lib/sync.js";
 import { mountAdapterKnowledge } from "./lib/mount.js";
-import { appendStatusLine, buildStatusLine } from "./lib/statusline.js";
+import { appendStatusLine, buildStatusLine, processAlive } from "./lib/statusline.js";
 import { buildTurnContext } from "./lib/turnprepare.js";
 import { MetricsSampler } from "./lib/metrics.js";
 import { registerDispatch, bindTaskId, removeEntry, pruneFinished } from "./lib/taskboard-auto.js";
 import { logAgentOps, shouldLogAgentOps } from "./lib/agent-ops-log.js";
 import { registerDailyReport } from "./lib/daily-report.js";
+import { registerDoctorSchedule } from "./lib/doctor-schedule.js";
+import { registerLostSweeper } from "./lib/lost-sweep.js";
+import { createWorktree, planWorktree, type WorktreeDecision } from "./lib/worktree.js";
 import { resolvePolicy, resolveRoute } from "./lib/routing.js";
 import {
   orchestrate,
@@ -62,6 +65,10 @@ const metricsSampler = new MetricsSampler();
 let cleanupTimer: NodeJS.Timeout | null = null;
 let metricsSaveTimer: NodeJS.Timeout | null = null;
 let checkpointTimer: NodeJS.Timeout | null = null;
+/** v0.4.8 running 残留定时清扫（启动 + 每小时） */
+let lostSweepTimer: NodeJS.Timeout | null = null;
+/** v0.4.8 doctor 定时体检（每分钟 tick，到点执行） */
+let doctorScheduleTimer: NodeJS.Timeout | null = null;
 /** v0.4.2 自动登记：toolCallId → 预登记条目 key（before/after 钩子串联） */
 const autoRegMap = new Map<string, string>();
 
@@ -164,6 +171,34 @@ const configSchema = Type.Object({
       ),
     }),
   ),
+  worktree: Type.Optional(
+    Type.Object({
+      enabled: Type.Optional(
+        Type.Boolean({
+          description:
+            "v0.4.8 worktree 隔离开关（默认 false）：开启后 harness_run 传 worktree=true 才会在 <dataDir>/worktrees/<taskId> 建独立 git worktree（分支 hb-wt/<taskId>）执行任务",
+        }),
+      ),
+    }),
+  ),
+  doctorSchedule: Type.Optional(
+    Type.Object({
+      enabled: Type.Optional(
+        Type.Boolean({ description: "v0.4.8 doctor 定时体检开关，默认开启" }),
+      ),
+      hour: Type.Optional(
+        Type.Number({
+          description: "v0.4.8 体检时刻（Asia/Shanghai 小时），默认 8 点，到达即检（当日仅一次）；error 级异常经 notifyCommand 推送",
+        }),
+      ),
+    }),
+  ),
+  hostVersionOverride: Type.Optional(
+    Type.String({
+      description:
+        "v0.4.8 宿主版本覆盖：设置后 selfcheck/doctor 直接采用该版本号，跳过特性检测（旧宿主无版本 API 时用，如 \"2026.7.1-2\"）",
+    }),
+  ),
   routing: Type.Optional(
     Type.Object({
       default: Type.Optional(
@@ -230,15 +265,6 @@ function openLedger(cfg: BridgeConfig): Ledger {
   });
 }
 
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 /** harness_run 返回体（cli/http 共用，字段与 v0.1 完全兼容，http 额外追加成本/归因字段） */
 function runResponse(rec: TaskRecord, wait: boolean): Record<string, unknown> {
   if (wait) {
@@ -269,6 +295,7 @@ function runResponse(rec: TaskRecord, wait: boolean): Record<string, unknown> {
       ...(rec.tokensReasoning != null ? { tokensReasoning: rec.tokensReasoning } : {}),
       ...(rec.tokensCacheRead != null ? { tokensCacheRead: rec.tokensCacheRead } : {}),
       ...(rec.tokensCacheWrite != null ? { tokensCacheWrite: rec.tokensCacheWrite } : {}),
+      ...(rec.worktreePath ? { worktreePath: rec.worktreePath, worktreeBranch: rec.worktreeBranch } : {}),
     };
   }
   return {
@@ -280,6 +307,7 @@ function runResponse(rec: TaskRecord, wait: boolean): Record<string, unknown> {
     hint: "后台执行中，用 harness_status 查询进度与结果",
     ...(rec.transport ? { transport: rec.transport } : {}),
     ...(rec.fallbackUsed ? { fallbackUsed: true } : {}),
+    ...(rec.worktreePath ? { worktreePath: rec.worktreePath, worktreeBranch: rec.worktreeBranch } : {}),
   };
 }
 
@@ -309,7 +337,7 @@ const toolEntry = defineToolPlugin({
       name: "harness_doctor",
       label: "Harness Doctor",
       description:
-        "v0.4.7 一键体检，五项检查收口：各 adapter 探活健康 / 宿主与 binary 版本探测 / binary 诊断（PATH、悬空符号链接线索）/ 台账健康（SQLite 完整性、WAL 大小、任务统计）/ 配置校验（全部配置键当前值 vs 默认值）。输出人话体检报告：每项一行结论 + ✅/⚠️/❌ 分级 + 异常项修复建议。",
+        "v0.4.7 一键体检，检查项收口：各 adapter 探活健康 / 宿主与 binary 版本探测 / binary 诊断（PATH、悬空符号链接线索）/ 台账健康（SQLite 完整性、WAL 大小、任务统计）/ worktree 残留（v0.4.8，已结束任务遗留的 worktree 清理提示）/ 配置校验（全部配置键当前值 vs 默认值）。输出人话体检报告：每项一行结论 + ✅/⚠️/❌ 分级 + 异常项修复建议。",
       parameters: Type.Object({}),
       execute: async (_params, config) => {
         const cfg = config as BridgeConfig;
@@ -412,6 +440,12 @@ const toolEntry = defineToolPlugin({
               "重试指定失败任务（fork-before-retry）：先 fork 原会话再续跑，幂等不污染原会话。值 = 原 taskId（须为 failed/timeout/lost 且有 sessionId）",
           }),
         ),
+        worktree: Type.Optional(
+          Type.Boolean({
+            description:
+              "v0.4.8 在独立 git worktree 中执行（默认 false）：需配置 worktree.enabled=true；在 <dataDir>/worktrees/<taskId> 建基于 HEAD 的 worktree（分支 hb-wt/<taskId>），任务结束后保留供人工审查合并；非 git 仓库/未开开关时降级为普通执行并记台账事件",
+          }),
+        ),
       }),
       execute: async (params, config) => {
         const cfg = config as BridgeConfig;
@@ -433,7 +467,28 @@ const toolEntry = defineToolPlugin({
         const wait = params.wait === true;
 
         // v0.4.4 工作区三级解析：显式 cwd > globalWorkspace 兜底 > serve 进程默认（不再兜底插件数据目录）
-        const ws = resolveWorkspace(params.cwd, cfg.globalWorkspace);
+        let ws = resolveWorkspace(params.cwd, cfg.globalWorkspace);
+
+        // v0.4.8 worktree 隔离：请求 worktree 且开关开启 → 建独立 worktree 接管 cwd（后续重试/降级同样在 worktree 内执行）；
+        // 未开开关 / 无 cwd / 非 git 仓库 / 创建失败 → 降级为普通执行（原因记台账 worktree 事件）
+        let worktreePlan: WorktreeDecision = { action: "skip" };
+        if (params.worktree === true) {
+          worktreePlan = planWorktree({
+            requested: true,
+            enabled: cfg.worktree?.enabled === true,
+            cwd: ws.cwd,
+            dataDir,
+          });
+          if (worktreePlan.action === "create") {
+            const created = createWorktree({ baseCwd: ws.cwd as string, dataDir, taskId: worktreePlan.taskId });
+            if (created.ok && created.path && created.branch) {
+              ws = { ...ws, cwd: created.path };
+              worktreePlan = { action: "create", taskId: worktreePlan.taskId, path: created.path, branch: created.branch };
+            } else {
+              worktreePlan = { action: "degrade", reason: created.reason ?? "worktree 创建失败，降级为普通执行" };
+            }
+          }
+        }
 
         // manual retryOf（fork-before-retry）保持 0.4.2 语义：仅首次派发生效
         let forkFromSessionId: string | undefined;
@@ -504,6 +559,8 @@ const toolEntry = defineToolPlugin({
             ledger,
             tasksDir,
             notifyCommand: cfg.notifyCommand,
+            // v0.4.8 worktree 隔离：仅首次派发沿用计划好的 taskId（与 worktree 目录/分支名一致）；重试/降级任务自生成 ID
+            ...(worktreePlan.action === "create" && meta.isInitial ? { taskId: worktreePlan.taskId } : {}),
             ...(onFinalRef ? { onFinal: onFinalRef } : {}),
           };
           if (transport.kind === "stdio-rpc") {
@@ -598,6 +655,39 @@ const toolEntry = defineToolPlugin({
 
         // 路由决策入事件台账（挂首个任务记录：选了谁、为什么）
         if (outcome.rec) {
+          // v0.4.8 worktree 决策入台账：created = worktree 接管 cwd（挂 worktreePath/branch 字段）；degraded = 降级原因
+          try {
+            if (worktreePlan.action === "create") {
+              ledger.append({
+                ...outcome.rec,
+                worktreePath: worktreePlan.path,
+                worktreeBranch: worktreePlan.branch,
+              });
+              ledger.addEvents(outcome.rec.id, [
+                {
+                  type: "worktree",
+                  payload: {
+                    decision: "created",
+                    path: worktreePlan.path,
+                    branch: worktreePlan.branch,
+                    ownerTaskId: worktreePlan.taskId,
+                    attempt: outcome.rec.id,
+                  },
+                  ts: new Date().toISOString(),
+                },
+              ]);
+            } else if (worktreePlan.action === "degrade") {
+              ledger.addEvents(outcome.rec.id, [
+                {
+                  type: "worktree",
+                  payload: { decision: "degraded", reason: worktreePlan.reason },
+                  ts: new Date().toISOString(),
+                },
+              ]);
+            }
+          } catch {
+            // 事件写入失败不影响响应
+          }
           try {
             ledger.addEvents(outcome.rec.id, [
               {
@@ -731,13 +821,24 @@ const toolEntry = defineToolPlugin({
         // v0.4.7 摘要模式（默认 true）：一行一任务方便人看；summary=false 保留原始 JSON 输出
         if (params.summary !== false) {
           const lines = tasks.map(formatTaskLine);
+          // v0.4.8 worktree 提示：有 worktree 隔离任务时输出产出位置与清理方式（人工审查合并后清理）
+          const wtTasks = tasks.filter((t) => t.worktreePath);
+          const worktreeHint =
+            wtTasks.length > 0
+              ? `worktree 隔离任务 ${wtTasks.length} 个：${wtTasks
+                  .map((t) => `${t.id} → ${t.worktreePath}（${t.worktreeBranch}，${t.status}）`)
+                  .join("；")}；产出在专属分支上，人工审查合并后可 git worktree remove 清理`
+              : undefined;
           return {
             total: recs.length,
             returned: tasks.length,
             lines,
             text: lines.join("\n"),
             summary: summarizeCost(recs),
-            hint: "摘要模式（每行: taskId ｜ harness ｜ 状态 ｜ 耗时 ｜ 成本）；summary=false 返回原始 JSON 任务列表",
+            ...(worktreeHint ? { worktreeHint } : {}),
+            hint: worktreeHint
+              ? `摘要模式（每行: taskId ｜ harness ｜ 状态 ｜ 耗时 ｜ 成本）；${worktreeHint}；summary=false 返回原始 JSON 任务列表`
+              : "摘要模式（每行: taskId ｜ harness ｜ 状态 ｜ 耗时 ｜ 成本）；summary=false 返回原始 JSON 任务列表",
           };
         }
         return {
@@ -947,6 +1048,27 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
       }
     }
 
+    // v0.4.8 running 残留定时清扫：启动时 + 每小时主动扫台账，pid 已消失且无退出记录的 running 任务标记 lost
+    try {
+      lostSweepTimer = registerLostSweeper({ ledger: openLedger(cfg) });
+    } catch {
+      // 清扫启动失败不影响主功能
+    }
+
+    // v0.4.8 doctor 定时体检：每天固定时刻（默认 8 点 Asia/Shanghai）自动体检，
+    // 结果写台账事件，error 级异常经 notifyCommand 推送（默认开启）
+    if (cfg.doctorSchedule?.enabled !== false) {
+      try {
+        doctorScheduleTimer = registerDoctorSchedule({
+          cfg,
+          ledger: openLedger(cfg),
+          notifyCommand: cfg.notifyCommand,
+        });
+      } catch {
+        // 定时体检启动失败不影响主功能
+      }
+    }
+
     // v0.4.1 台账自动清理：task_event 保留 N 天（默认 30，0=不清理）
     const retentionDays = cfg.eventRetentionDays ?? 30;
     if (retentionDays > 0) {
@@ -1021,6 +1143,14 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
       if (checkpointTimer) {
         clearInterval(checkpointTimer);
         checkpointTimer = null;
+      }
+      if (lostSweepTimer) {
+        clearInterval(lostSweepTimer);
+        lostSweepTimer = null;
+      }
+      if (doctorScheduleTimer) {
+        clearInterval(doctorScheduleTimer);
+        doctorScheduleTimer = null;
       }
     });
   },

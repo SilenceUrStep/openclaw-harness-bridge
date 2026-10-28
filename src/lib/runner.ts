@@ -54,6 +54,8 @@ export interface RunOptions {
   prompt: string;
   resumeSessionId?: string;
   cwd?: string;
+  /** v0.4.8 worktree 隔离：显式指定任务 ID（worktree 分支/目录名与之一致），缺省自动生成 */
+  taskId?: string;
   wait: boolean;
   timeoutMs: number;
   /** v0.4.4 实际生效超时的来源（resolveTaskTimeout 解析结果，记台账） */
@@ -390,7 +392,7 @@ export function runTask(opts: RunOptions): TaskRecord {
   const argv = buildArgv(opts);
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
-  const id = newTaskId();
+  const id = opts.taskId ?? newTaskId();
   const logFile = path.join(opts.tasksDir, `${id}.log`);
   const base: TaskRecord = {
     id,

@@ -25,6 +25,8 @@ export interface DshRunOptions {
   transport: StdioRpcConfig;
   prompt: string;
   cwd?: string;
+  /** v0.4.8 worktree 隔离：显式指定任务 ID（worktree 分支/目录名与之一致），缺省自动生成 */
+  taskId?: string;
   /** DSH_HOME 隔离目录（绝不碰用户交互式 ~/.dsh） */
   dshHome?: string;
   wait: boolean;
@@ -307,7 +309,7 @@ function mapDshNotification(msg: RpcMessage, sessionId: string, sink: DshEventSi
  * 版本越界显性拒绝，不做 headless 兜底。
  */
 export async function runDshTask(opts: DshRunOptions): Promise<TaskRecord> {
-  const id = newTaskId();
+  const id = opts.taskId ?? newTaskId();
   const startedAt = new Date().toISOString();
   const logFile = path.join(opts.tasksDir, `${id}.log`);
   const base: TaskRecord = buildBaseTaskRecord({

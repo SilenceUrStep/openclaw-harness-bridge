@@ -96,6 +96,28 @@ describe("buildDailyReport（v0.4.6 台账日报）", () => {
     expect(report).toContain("无任务");
   });
 
+  it("v0.4.8 成本行：窗口内 cost_total（缺省回落 cost）合计，窗口外不计", () => {
+    const l = tmpLedger();
+    l.append(rec({ id: "m1", harness: "opencode", status: "success", createdAt: "2026-10-26T01:00:00.000Z", costTotal: 0.0123, durationMs: 60_000 }));
+    l.append(rec({ id: "m2", harness: "codex", status: "failed", createdAt: "2026-10-26T02:00:00.000Z", cost: 0.004, durationMs: 60_000 }));
+    l.append(rec({ id: "m0", harness: "opencode", status: "success", createdAt: "2026-10-26T03:00:00.000Z", durationMs: 60_000 }));
+    l.append(rec({ id: "mx", harness: "codex", status: "success", createdAt: "2026-10-25T12:00:00.000Z", costTotal: 9.99 }));
+    const report = buildDailyReport(l.dbPath, "2026-10-26");
+    expect(report).toContain("成本：$0.0163"); // 0.0123 + 0.004
+    expect(report).not.toContain("9.99"); // 窗口外成本不计
+  });
+
+  it("v0.4.8 跨日过滤：库里有历史任务但昨日窗口为空 → 昨日无任务（绝不累计全库）", () => {
+    const l = tmpLedger();
+    l.append(rec({ id: "old1", harness: "opencode", status: "failed", createdAt: "2026-10-20T01:00:00.000Z", durationMs: 60_000 }));
+    l.append(rec({ id: "old2", harness: "codex", status: "success", createdAt: "2026-10-27T01:00:00.000Z", durationMs: 60_000 }));
+    const report = buildDailyReport(l.dbPath, "2026-10-26");
+    expect(report.startsWith("📊 harness 台账日报 10-26")).toBe(true);
+    expect(report).toContain("2026-10-26 无任务");
+    expect(report).not.toContain("old1");
+    expect(report).not.toContain("old2");
+  });
+
   it("缺省日期：聚合上海昨日数据", () => {
     const l = tmpLedger();
     const yest = new Date(Date.now() - 86400_000).toLocaleString("sv-SE", {

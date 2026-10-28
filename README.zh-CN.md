@@ -64,11 +64,19 @@ harness_status { }                                        // 查进度 / 结果
 | 工具 | 作用 |
 |------|------|
 | `harness_list` | 列出已注册 harness 及健康状态（二进制/版本/配置文件存在性） |
-| `harness_doctor` | v0.4.7 一键体检：adapter 探活 / 宿主与 binary 版本 / binary 诊断（PATH、悬空链接线索）/ 台账健康（SQLite 完整性、WAL、任务统计）/ 配置校验（当前值 vs 默认值），✅/⚠️/❌ 分级 + 修复建议 |
+| `harness_doctor` | v0.4.7 一键体检（v0.4.8 新增 worktree 残留检查）：adapter 探活 / 宿主与 binary 版本 / binary 诊断（PATH、悬空链接线索）/ 台账健康（SQLite 完整性、WAL、任务统计）/ worktree 残留 / 配置校验（当前值 vs 默认值），✅/⚠️/❌ 分级 + 修复建议 |
 | `harness_sync_models` | 按统一参数字典校准各 harness 模型配置（报告 / 字段级 merge 写回 / 切默认模型） |
-| `harness_run` | 委派任务（默认后台执行 + 台账；`wait=true` 同步等待） |
-| `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部）；v0.4.7 默认摘要模式：一行一任务（taskId/harness/状态/耗时/成本），`summary=false` 返回原始 JSON |
+| `harness_run` | 委派任务（默认后台执行 + 台账；`wait=true` 同步等待；v0.4.8 `worktree=true` 在隔离 git worktree（分支 `hb-wt/<taskId>`）中执行） |
+| `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部）；v0.4.7 默认摘要模式：一行一任务（taskId/harness/状态/耗时/成本），`summary=false` 返回原始 JSON；v0.4.8 附带 worktree 隔离任务提示 |
 | `harness_mount` | 把共享知识库目录挂载进 harness（external_directory 放行 + instructions 注入；dry-run/apply，幂等） |
+
+## v0.4.8 新特性
+
+- **worktree 隔离** — `harness_run` 新增 `worktree=true`：任务在专属 git worktree 中执行（`<dataDir>/worktrees/<taskId>`，从 HEAD 建分支 `hb-wt/<taskId>`）。非 git 目录或 `worktree.enabled` 未开启时优雅降级为普通执行，并写 ledger 事件说明原因。任务结束后 worktree 保留（产出在 `hb-wt/<taskId>` 分支上，供人工审查合并）；`harness_status` 输出 worktree 提示，`harness_doctor` 新增残留检查（列出现存 worktree 供 `git worktree remove` 手工清理）。
+- **doctor 定时体检** — v0.4.7 的体检工具接上定时器（`doctorSchedule.enabled`，默认开；`doctorSchedule.hour`，默认 8 点 Asia/Shanghai）。存在 error 级检查项时经 `notifyCommand` 推送 `HB_ALERT=doctor_report`（脚本渲染为 `[harness体检]`）；全绿或仅 warn 时只写 ledger 事件。每天最多推送一次。
+- **running 残留自动清理** — 网关重启后 `status=running` 的任务会永久滞留。插件启动时及每小时扫描 running 任务，用 `process.kill(pid, 0)` 探活，进程已消失的标记为 `lost` 并写 `lost_sweep` 事件（taskId/pid/最后活动时间）。与 `harness_status` 查询时的即时判断互补。
+- **日报成本行** — 日报新增 `成本：$X` 行（昨日窗口内 cost_total/cost 求和），与 Token 用量并列。按日窗口统计（仅统计报告日期前一天创建的任务）已有测试覆盖；昨日无任务时输出「昨日无任务」。
+- **`hostVersionOverride` 配置键** — 新增可选字符串：设置后 self-check 与 doctor 的宿主版本探测直接使用该值，跳过逐级探测回退。适用于无版本 API 的宿主（如 2026.7.1-2）。
 
 ## v0.4.7 新特性
 

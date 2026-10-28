@@ -68,6 +68,10 @@ export interface TaskRecord {
   timeoutMs?: number;
   /** v0.4.4 实际生效超时的来源（explicit / taskType_default / global_default） */
   timeoutSource?: TimeoutSource;
+  /** v0.4.8 worktree 隔离：任务实际执行的 git worktree 路径（与 cwd 相同，显式落库便于 status/doctor 查询） */
+  worktreePath?: string;
+  /** v0.4.8 worktree 隔离：本次任务的专属分支 hb-wt/<taskId> */
+  worktreeBranch?: string;
 }
 
 export type LedgerEventType =
@@ -95,7 +99,13 @@ export type LedgerEventType =
   /** v0.4.4 WAL 定期 checkpoint（含 WAL 页数） */
   | "checkpoint"
   /** v0.4.4 工作区三级解析：记录实际生效 cwd 与来源 */
-  | "workspace_resolved";
+  | "workspace_resolved"
+  /** v0.4.8 worktree 隔离：created = worktree 建立并接管 cwd；degraded = 请求 worktree 但降级为普通执行 */
+  | "worktree"
+  /** v0.4.8 running 残留定时清扫：pid 已消失且无退出记录的任务被标记 lost */
+  | "lost_sweep"
+  /** v0.4.8 doctor 定时体检：每日一次体检结果（含异常项摘要与是否推送） */
+  | "doctor_report";
 
 export interface LedgerEvent {
   taskId: string;
@@ -219,6 +229,8 @@ function migrateColumns(driver: SqlDriver): void {
     timeout_source: "TEXT",
     prompt: "TEXT",
     cwd: "TEXT",
+    worktree_path: "TEXT",
+    worktree_branch: "TEXT",
     pid: "INTEGER",
     log_file: "TEXT",
     output_tail: "TEXT",
@@ -277,6 +289,8 @@ CREATE TABLE IF NOT EXISTS task (
   timeout_source TEXT,
   prompt TEXT,
   cwd TEXT,
+  worktree_path TEXT,
+  worktree_branch TEXT,
   pid INTEGER,
   log_file TEXT,
   output_tail TEXT,
@@ -328,6 +342,8 @@ const TASK_COLUMNS = [
   "timeout_source",
   "prompt",
   "cwd",
+  "worktree_path",
+  "worktree_branch",
   "pid",
   "log_file",
   "output_tail",
@@ -371,6 +387,8 @@ function rowToRecord(r: TaskRow): TaskRecord {
   if (r.timeout_source != null) rec.timeoutSource = r.timeout_source as TimeoutSource;
   if (r.prompt != null) rec.prompt = r.prompt as string;
   if (r.cwd != null) rec.cwd = r.cwd as string;
+  if (r.worktree_path != null) rec.worktreePath = r.worktree_path as string;
+  if (r.worktree_branch != null) rec.worktreeBranch = r.worktree_branch as string;
   if (r.pid != null) rec.pid = r.pid as number;
   if (r.log_file != null) rec.logFile = r.log_file as string;
   if (r.output_tail != null) rec.outputTail = r.output_tail as string;
@@ -410,6 +428,8 @@ function recordToRow(rec: TaskRecord): TaskRow {
   if (rec.timeoutSource !== undefined) row.timeout_source = rec.timeoutSource ?? null;
   if (rec.prompt !== undefined) row.prompt = rec.prompt ?? null;
   if (rec.cwd !== undefined) row.cwd = rec.cwd ?? null;
+  if (rec.worktreePath !== undefined) row.worktree_path = rec.worktreePath ?? null;
+  if (rec.worktreeBranch !== undefined) row.worktree_branch = rec.worktreeBranch ?? null;
   if (rec.pid !== undefined) row.pid = rec.pid ?? null;
   if (rec.logFile !== undefined) row.log_file = rec.logFile ?? null;
   if (rec.outputTail !== undefined) row.output_tail = rec.outputTail ?? null;

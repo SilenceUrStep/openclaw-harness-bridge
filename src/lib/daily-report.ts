@@ -14,7 +14,7 @@ import { openDriverSync, type SqlDriver } from "./ledger.js";
 const TZ = "Asia/Shanghai";
 
 /** 上海时区（固定 UTC+8 无夏令时）当前日期与小时 */
-function shanghaiNow(d: Date = new Date()): { date: string; hour: number } {
+export function shanghaiNow(d: Date = new Date()): { date: string; hour: number } {
   const s = d.toLocaleString("sv-SE", {
     timeZone: TZ,
     year: "numeric",
@@ -62,6 +62,7 @@ interface DailyStatsRow {
   successCount?: number | bigint | null;
   failedCount?: number | bigint | null;
   tokens?: number | bigint | null;
+  costTotal?: number | bigint | null;
   avgDuration?: number | null;
   maxDuration?: number | null;
 }
@@ -99,6 +100,7 @@ export function buildDailyReport(ledgerDbPath: string, date?: string): string {
            SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS successCount,
            SUM(CASE WHEN status IN ('failed', 'timeout', 'lost') THEN 1 ELSE 0 END) AS failedCount,
            SUM(COALESCE(tokens_input, 0) + COALESCE(tokens_output, 0) + COALESCE(tokens_cache_read, 0)) AS tokens,
+           SUM(COALESCE(cost_total, cost, 0)) AS costTotal,
            AVG(duration_ms) AS avgDuration,
            MAX(duration_ms) AS maxDuration
          FROM task WHERE ${WINDOW_COND}`,
@@ -110,11 +112,14 @@ export function buildDailyReport(ledgerDbPath: string, date?: string): string {
     const success = Number(stats?.successCount ?? 0);
     const failed = Number(stats?.failedCount ?? 0);
     const tokens = Number(stats?.tokens ?? 0);
+    const costTotal = Number(stats?.costTotal ?? 0);
     const rate = `${Math.round((success / total) * 100)}%`;
     const lines = [
       title,
       `任务：${total} 个｜成功 ${success}｜失败 ${failed}｜成功率 ${rate}`,
       `Token 消耗：${formatInt(tokens)}`,
+      // v0.4.8 补成本行：仅在有成本样本时展示（避免 0 污染旧台账可读性）
+      ...(costTotal > 0 ? [`成本：$${costTotal.toFixed(4)}`] : []),
       // AVG/MAX 无耗时样本时为 null，Number(null)=0 会误显示 0ms，需先判空
       `耗时：平均 ${formatDuration(stats?.avgDuration == null ? undefined : Number(stats.avgDuration))}｜最长 ${formatDuration(stats?.maxDuration == null ? undefined : Number(stats.maxDuration))}`,
     ];

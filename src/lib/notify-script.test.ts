@@ -93,13 +93,26 @@ describe("hb_notify.sh 渲染（v0.4.7 可行动性改造）", () => {
     expect(msg).toContain("(60s window: 2 more tasks suppressed: t2, t3)");
   });
 
-  it("来源标记：stall / watchdog / selfcheck / task-success 各归其位", () => {
+  it("来源标记：stall / watchdog / selfcheck / task-success / doctor 各归其位", () => {
     expect(render({ HB_ALERT: "task_stall", HB_DETAIL: "d" })).toContain("[harness告警·stall]");
     expect(
       render({ HB_ALERT: "health_change", HB_ADAPTER: "dsh", HB_STATE: "unhealthy", HB_PREV_STATE: "healthy" }),
     ).toContain("[harness告警·watchdog]");
     expect(render({ HB_ALERT: "selfcheck", HB_SELFCHECK: "all_green" })).toContain("[harness告警·selfcheck]");
     expect(render({ HB_ALERT: "task_success", HB_DURATION: "6m40s" })).toContain("[harness通知·task-success]");
+  });
+
+  it("doctor_report 分支（v0.4.8）：[harness体检] 标题渲染 HB_DETAIL 异常摘要，不落 task_failed", () => {
+    const msg = render({
+      HB_ALERT: "doctor_report",
+      HB_DETAIL: "❌ 台账健康：完整性 check fail\n   ↳ 建议: 恢复备份\n另有 1 个 warn 项",
+      HB_TIME: "2026-10-28T08:00:00.000Z",
+    });
+    expect(msg).toContain("[harness体检]");
+    expect(msg).toContain("❌ 台账健康：完整性 check fail");
+    expect(msg).toContain("另有 1 个 warn 项");
+    expect(msg).toContain("时间: 2026-10-28T08:00:00.000Z");
+    expect(msg).not.toContain("任务失败");
   });
 
   it("task_success 正常渲染（回归旧版副本误报场景）", () => {
@@ -117,12 +130,13 @@ describe("hb_notify.sh 渲染（v0.4.7 可行动性改造）", () => {
     expect(msg).not.toContain("任务失败");
   });
 
-  it("其余占位不再出现裸 ?（selfcheck/health_change/stall）", () => {
+  it("其余占位不再出现裸 ?（selfcheck/health_change/stall/doctor_report）", () => {
     for (const env of [
       { HB_ALERT: "selfcheck" },
       { HB_ALERT: "health_change" },
       { HB_ALERT: "task_stall" },
       { HB_ALERT: "task_success" },
+      { HB_ALERT: "doctor_report" },
     ]) {
       const msg = render(env);
       expect(msg.includes("?")).toBe(false);

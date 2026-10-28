@@ -47,8 +47,13 @@ export interface HostVersionApi {
   hostVersion?: unknown;
 }
 
-/** 宿主版本探测（特性检测优先级：api 字段 → OPENCLAW_VERSION → openclaw/package.json 动态 import → unknown） */
-export async function detectHostVersion(api?: HostVersionApi): Promise<string> {
+/**
+ * 宿主版本探测：hostVersionOverride 配置（v0.4.8）显式设置时直接采用（跳过特性检测，
+ * 旧宿主无版本 API 时用）；否则按特性检测优先级 api 字段 → OPENCLAW_VERSION →
+ * openclaw/package.json 动态 import → unknown。
+ */
+export async function detectHostVersion(api?: HostVersionApi, override?: string): Promise<string> {
+  if (typeof override === "string" && override.trim()) return override.trim();
   for (const v of [api?.openclawVersion, api?.version, api?.hostVersion]) {
     if (typeof v === "string" && v.trim()) return v.trim();
   }
@@ -237,7 +242,7 @@ export async function startupVersionCheck(opts: {
   api?: HostVersionApi;
   runSelfCheck?: typeof runSelfCheck;
 }): Promise<{ hostVersion: string; selfCheckRan: boolean; report?: SelfCheckReport }> {
-  const hostVersion = await detectHostVersion(opts.api);
+  const hostVersion = await detectHostVersion(opts.api, opts.cfg.hostVersionOverride);
   const stateFile = path.join(opts.dataDir, "host-state.json");
   const prev = loadHostState(stateFile);
   recordHostVersion(opts.ledger, hostVersion, prev?.hostVersion);

@@ -131,6 +131,20 @@ export interface DailyReportConfig {
   hour?: number;
 }
 
+/** v0.4.8 worktree 隔离配置段 */
+export interface WorktreeConfig {
+  /** 默认关闭：开启后 harness_run 传 worktree=true 才会建立独立 git worktree */
+  enabled?: boolean;
+}
+
+/** v0.4.8 doctor 定时体检配置段 */
+export interface DoctorScheduleConfig {
+  /** 默认开启（false 关闭定时体检） */
+  enabled?: boolean;
+  /** 体检时刻（Asia/Shanghai 小时），默认 8 点，到达即检（当日仅一次） */
+  hour?: number;
+}
+
 export interface BridgeConfig {
   dataDir?: string;
   adaptersDir?: string;
@@ -159,6 +173,12 @@ export interface BridgeConfig {
   agentOpsLogKeep?: number;
   /** v0.4.6 台账日报推送（默认开启，每天 21 点 Asia/Shanghai 经 notifyCommand 推送） */
   dailyReport?: DailyReportConfig;
+  /** v0.4.8 worktree 隔离（默认关闭；开启后 harness_run worktree=true 才生效） */
+  worktree?: WorktreeConfig;
+  /** v0.4.8 doctor 定时体检（默认开启，每天 8 点 Asia/Shanghai，异常项经 notifyCommand 推送） */
+  doctorSchedule?: DoctorScheduleConfig;
+  /** v0.4.8 宿主版本覆盖：设置后 selfcheck/doctor 直接采用该版本号，跳过特性检测（旧宿主无版本 API 时用） */
+  hostVersionOverride?: string;
   /** v0.4 出站消息追加后台任务状态行（默认开启，false 关闭） */
   statusLineEnabled?: boolean;
   /** v0.4 markdown taskboard 路径：状态行合并其「进行中」段 + harness_run 自动登记 */
