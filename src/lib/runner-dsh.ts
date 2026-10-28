@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { checkHealth, type Adapter } from "./adapters.js";
 import { truncate2kb, type Ledger, type LedgerEventType, type TaskRecord, type TimeoutSource } from "./ledger.js";
-import { newTaskId, notify, sendStallAlert, timeoutRecordFields } from "./runner.js";
+import { buildBaseTaskRecord, newTaskId, notify, sendStallAlert, timestampId } from "./runner.js";
 import { checkVersionGate } from "./transport.js";
 
 /** RFC §4.1 事件线界：单行 8KB / 单事件 32KB，超限截断并带标记 */
@@ -236,10 +236,7 @@ function ensureProcess(opts: DshRunOptions): DshProc {
 }
 
 export function newDshSessionId(): string {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const ts = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}Z`;
-  return `dsh_${ts}_${Math.random().toString(36).slice(2, 8)}`;
+  return timestampId("dsh", 6);
 }
 
 interface DshEventSink {
@@ -313,21 +310,18 @@ export async function runDshTask(opts: DshRunOptions): Promise<TaskRecord> {
   const id = newTaskId();
   const startedAt = new Date().toISOString();
   const logFile = path.join(opts.tasksDir, `${id}.log`);
-  const base: TaskRecord = {
+  const base: TaskRecord = buildBaseTaskRecord({
     id,
-    harness: opts.adapter.id,
+    adapterId: opts.adapter.id,
     transport: "stdio-rpc",
-    prompt: opts.prompt.length > 500 ? `${opts.prompt.slice(0, 500)}…` : opts.prompt,
+    prompt: opts.prompt,
     cwd: opts.cwd,
-    status: "running",
-    pid: process.pid,
-    createdAt: startedAt,
     startedAt,
     logFile,
-    title: `${id}; ${opts.prompt.slice(0, 60)}`,
-    ...timeoutRecordFields(opts.timeoutMs, opts.timeoutSource),
-    ...(opts.fallbackUsed ? { fallbackUsed: true } : {}),
-  };
+    timeoutMs: opts.timeoutMs,
+    timeoutSource: opts.timeoutSource,
+    fallbackUsed: opts.fallbackUsed,
+  });
   opts.ledger.append(base);
   const exec = executeDshTask(opts, base);
   if (opts.wait) return exec;
@@ -593,6 +587,7 @@ export async function runDshHeadless(opts: DshRunOptions, base?: TaskRecord): Pr
   const events: Array<{ type: string; payload: unknown; ts: string }> = [];
   let failReason: string | undefined;
   let lastText = "";
+  let rec: TaskRecord;
   try {
     const r = spawnSync(argv[0], argv.slice(1), {
       cwd: opts.cwd,
@@ -631,7 +626,7 @@ export async function runDshHeadless(opts: DshRunOptions, base?: TaskRecord): Pr
     }
     const timedOut = r.signal === "SIGTERM";
     const status = timedOut ? "timeout" : r.status === 0 && !failReason ? "success" : "failed";
-    const rec: TaskRecord = {
+    rec = {
       ...rec0,
       status,
       exitCode: r.status ?? null,
@@ -643,12 +638,8 @@ export async function runDshHeadless(opts: DshRunOptions, base?: TaskRecord): Pr
       ...(failReason ? { failReason } : {}),
       ...(timedOut && !failReason ? { failReason: `timeout after ${opts.timeoutMs}ms` } : {}),
     };
-    if (events.length) opts.ledger.addEvents(rec.id, events);
-    opts.ledger.append(rec);
-    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
-    return rec;
   } catch (err) {
-    const rec: TaskRecord = {
+    rec = {
       ...rec0,
       status: "failed",
       finishedAt: new Date().toISOString(),
@@ -656,9 +647,10 @@ export async function runDshHeadless(opts: DshRunOptions, base?: TaskRecord): Pr
       fallbackUsed: true,
       failReason: `headless 执行失败: ${(err as Error).message}`,
     };
-    if (events.length) opts.ledger.addEvents(rec.id, events);
-    opts.ledger.append(rec);
-    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
-    return rec;
   }
+  // 统一收口：事件落台账 + 终态回写 + 通知（成功/异常两分支共用）
+  if (events.length) opts.ledger.addEvents(rec.id, events);
+  opts.ledger.append(rec);
+  notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
+  return rec;
 }

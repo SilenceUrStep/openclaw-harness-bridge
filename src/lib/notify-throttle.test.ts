@@ -93,6 +93,91 @@ describe("notify 节流（v0.4.1）", () => {
   }, 15000);
 });
 
+describe("节流抑制信息保全（v0.4.7）", () => {
+  it("窗口内被抑制的 taskId 攒列表，下条告警带 HB_SUPPRESSED_IDS", () => {
+    notify("echo ok", rec({ id: "t1", status: "failed" }));
+    notify("echo ok", rec({ id: "t2", status: "failed" }));
+    notify("echo ok", rec({ id: "t3", status: "failed" }));
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+    vi.useFakeTimers();
+    try {
+      vi.advanceTimersByTime(61_000);
+      notify("echo ok", rec({ id: "t4", status: "failed" }));
+      expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+      const opts = spawnSyncMock.mock.calls[1][2] as { env: Record<string, string> };
+      expect(opts.env.HB_SUPPRESSED).toBe("2");
+      expect(opts.env.HB_SUPPRESSED_IDS).toBe("t2, t3");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("发出下条告警后抑制列表清空（再触发不带旧 id）", () => {
+    notify("echo ok", rec({ id: "a1", status: "failed" }));
+    notify("echo ok", rec({ id: "a2", status: "failed" }));
+    vi.useFakeTimers();
+    try {
+      vi.advanceTimersByTime(61_000);
+      notify("echo ok", rec({ id: "a3", status: "failed" })); // 带 a2，发出后列表清空
+      notify("echo ok", rec({ id: "a4", status: "failed" })); // 窗口内被抑制
+      notify("echo ok", rec({ id: "a5", status: "failed" })); // 窗口内被抑制
+      vi.advanceTimersByTime(61_000);
+      notify("echo ok", rec({ id: "a6", status: "failed" })); // 只带 a4/a5，不带旧 a2
+      const opts = spawnSyncMock.mock.calls[2][2] as { env: Record<string, string> };
+      expect(opts.env.HB_SUPPRESSED).toBe("2");
+      expect(opts.env.HB_SUPPRESSED_IDS).toBe("a4, a5");
+      expect(opts.env.HB_SUPPRESSED_IDS).not.toContain("a2");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("无抑制时不带 HB_SUPPRESSED_IDS（首次告警）", () => {
+    notify("echo ok", rec({ status: "failed" }));
+    const opts = spawnSyncMock.mock.calls[0][2] as { env: Record<string, string> };
+    expect(opts.env.HB_SUPPRESSED_IDS).toBeUndefined();
+    expect(opts.env.HB_SUPPRESSED).toBeUndefined();
+  });
+
+  it("抑制列表封顶 20 条（超出只记条数，防 env 膨胀）", () => {
+    notify("echo ok", rec({ id: "first", status: "failed" }));
+    for (let i = 1; i <= 25; i++) {
+      notify("echo ok", rec({ id: `s${i}`, status: "failed" }));
+    }
+    vi.useFakeTimers();
+    try {
+      vi.advanceTimersByTime(61_000);
+      notify("echo ok", rec({ id: "last", status: "failed" }));
+      const opts = spawnSyncMock.mock.calls[1][2] as { env: Record<string, string> };
+      expect(opts.env.HB_SUPPRESSED).toBe("25");
+      const ids = (opts.env.HB_SUPPRESSED_IDS as string).split(", ");
+      expect(ids).toHaveLength(20);
+      expect(ids[0]).toBe("s1");
+      expect(ids[19]).toBe("s20");
+      expect(opts.env.HB_SUPPRESSED_IDS).not.toContain("s21");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("不同 harness 的抑制列表互不串扰", () => {
+    notify("echo ok", rec({ id: "h1t1", harness: "opencode", status: "failed" }));
+    notify("echo ok", rec({ id: "h1t2", harness: "opencode", status: "failed" }));
+    notify("echo ok", rec({ id: "h2t1", harness: "dsh", status: "failed" }));
+    notify("echo ok", rec({ id: "h2t2", harness: "dsh", status: "failed" }));
+    expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+    vi.useFakeTimers();
+    try {
+      vi.advanceTimersByTime(61_000);
+      notify("echo ok", rec({ id: "h2t3", harness: "dsh", status: "failed" }));
+      const opts = spawnSyncMock.mock.calls[2][2] as { env: Record<string, string> };
+      expect(opts.env.HB_SUPPRESSED_IDS).toBe("h2t2");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("notify 成功通知（v0.4.4 长任务完成）", () => {
   it("时长达到阈值（默认 5min）推 task_success 通知，env 齐全", () => {
     notify(

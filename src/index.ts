@@ -22,6 +22,7 @@ import { Ledger, openLedgerAt, summarizeCost, type LedgerEvent, type TaskRecord 
 import {
   extractSessionId,
   fillTemplate,
+  formatTaskLine,
   resolveTaskTimeout,
   resolveWorkspace,
   runTask,
@@ -52,6 +53,7 @@ import {
   type OrchestrationOutcome,
 } from "./lib/resilience.js";
 import { probeAllAdapters, probeAvailability } from "./lib/health.js";
+import { renderDoctorReport, runDoctor } from "./lib/doctor.js";
 import { HealthWatchdog } from "./lib/watchdog.js";
 import { startupVersionCheck, type HostVersionApi } from "./lib/selfcheck.js";
 
@@ -300,6 +302,24 @@ const toolEntry = defineToolPlugin({
       execute: async (_params, config) => {
         const cfg = config as BridgeConfig;
         return probeAllAdapters(cfg);
+      },
+    }),
+
+    tool({
+      name: "harness_doctor",
+      label: "Harness Doctor",
+      description:
+        "v0.4.7 一键体检，五项检查收口：各 adapter 探活健康 / 宿主与 binary 版本探测 / binary 诊断（PATH、悬空符号链接线索）/ 台账健康（SQLite 完整性、WAL 大小、任务统计）/ 配置校验（全部配置键当前值 vs 默认值）。输出人话体检报告：每项一行结论 + ✅/⚠️/❌ 分级 + 异常项修复建议。",
+      parameters: Type.Object({}),
+      execute: async (_params, config) => {
+        const cfg = config as BridgeConfig;
+        const report = await runDoctor(cfg);
+        return {
+          allOk: report.allOk,
+          fullyHealthy: report.fullyHealthy,
+          checks: report.checks,
+          report: renderDoctorReport(report),
+        };
       },
     }),
 
@@ -635,7 +655,7 @@ const toolEntry = defineToolPlugin({
       name: "harness_status",
       label: "Harness Status",
       description:
-        "查询委派任务台账（SQLite）：状态/退出码/会话 ID/耗时/输出尾部/成本与 token 聚合/失败归因（fail_reason）。running 任务若进程已消失且无退出记录，自动标记 lost。新增：events=taskId 输出单任务事件时间线；since/until 时间窗过滤；legacy=true 只读查看 v0.1 JSON Lines 旧台账；metrics=true 输出进程内存/事件循环延迟观测摘要（v0.4.1）。",
+        "查询委派任务台账（SQLite）：状态/退出码/会话 ID/耗时/输出尾部/成本与 token 聚合/失败归因（fail_reason）。running 任务若进程已消失且无退出记录，自动标记 lost。新增：events=taskId 输出单任务事件时间线；since/until 时间窗过滤；legacy=true 只读查看 v0.1 JSON Lines 旧台账；metrics=true 输出进程内存/事件循环延迟观测摘要（v0.4.1）；v0.4.7 摘要模式（默认开）：一行一任务（taskId/harness/状态/耗时/成本），summary=false 保留原始 JSON 输出。",
       parameters: Type.Object({
         taskId: Type.Optional(Type.String({ description: "精确查询单个任务" })),
         harness: Type.Optional(Type.String({ description: "按 harness 过滤" })),
@@ -643,6 +663,12 @@ const toolEntry = defineToolPlugin({
           Type.String({ description: "按状态过滤: running/success/failed/timeout/lost" }),
         ),
         limit: Type.Optional(Type.Number({ description: "返回条数上限，默认 20" })),
+        summary: Type.Optional(
+          Type.Boolean({
+            description:
+              "v0.4.7 摘要模式（默认 true）：一行一任务（taskId/harness/状态/耗时/成本）方便人看；false 返回原始 JSON 任务列表",
+          }),
+        ),
         events: Type.Optional(
           Type.String({ description: "输出指定任务的事件时间线（值 = taskId）" }),
         ),
@@ -702,6 +728,18 @@ const toolEntry = defineToolPlugin({
           }
           return r;
         });
+        // v0.4.7 摘要模式（默认 true）：一行一任务方便人看；summary=false 保留原始 JSON 输出
+        if (params.summary !== false) {
+          const lines = tasks.map(formatTaskLine);
+          return {
+            total: recs.length,
+            returned: tasks.length,
+            lines,
+            text: lines.join("\n"),
+            summary: summarizeCost(recs),
+            hint: "摘要模式（每行: taskId ｜ harness ｜ 状态 ｜ 耗时 ｜ 成本）；summary=false 返回原始 JSON 任务列表",
+          };
+        }
         return {
           total: recs.length,
           returned: tasks.length,

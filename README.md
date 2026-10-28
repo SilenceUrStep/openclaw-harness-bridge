@@ -38,9 +38,12 @@ openclaw plugins inspect harness-bridge --runtime
 
 **Out of the box (zero config):**
 
-- Data directory `~/.openclaw/harness-bridge` is created automatically (SQLite ledger + task logs)
-- All five tools are available immediately — run `harness_list` to see every adapter's health
+- Every config key has a working default — the plugin runs with no configuration at all (full list: [docs/config-reference.md](docs/config-reference.md))
+- Data directory `~/.openclaw/harness-bridge` is created automatically (SQLite ledger + task logs + agent-ops log + metrics persistence)
+- All six tools are available immediately — run `harness_list` to see every adapter's health, `harness_doctor` for a one-shot health report
 - The v0.4 status line is on by default: every outbound reply gets a `后台任务：…` (background tasks) line built from the ledger
+- Periodic health watchdog (5 min), hourly WAL checkpoint, daily ledger report timer and event retention (30 days) are all on by default
+- Task timeouts resolve per `taskType` (coding 45 min, others 10 min); failed tasks alert via `notifyCommand` — set `notifyCommand` (recommended: the bundled `scripts/hb_notify.sh`) to actually receive pushes
 
 **Optional setup (openclaw.json → plugins.entries["harness-bridge"].config):**
 
@@ -60,10 +63,22 @@ harness_status { }                                        // poll progress / res
 | Tool | Purpose |
 |------|---------|
 | `harness_list` | List registered harnesses and their health (binary / version / config-file presence) |
+| `harness_doctor` | v0.4.7 one-shot health report: adapter probes / host & binary versions / binary diagnostics (PATH, dangling symlinks) / ledger health (SQLite integrity, WAL size, task stats) / config audit (current value vs default for every key); ✅/⚠️/❌ graded with fix hints |
 | `harness_sync_models` | Calibrate each harness's model config against a shared parameter dictionary (report / field-level merge write-back / default-model switch) |
 | `harness_run` | Delegate a task (background + ledger by default; `wait=true` for synchronous runs) |
-| `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail) |
+| `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail); v0.4.7 summary mode on by default (one line per task: taskId / harness / status / duration / cost), `summary=false` for the raw JSON |
 | `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
+
+## What's new in v0.4.7
+
+- **One-shot health check** — new `harness_doctor` tool consolidates five checks into a single human-readable report (one line per check, ✅/⚠️/❌ graded, fix hints on anomalies): adapter probe health / host & binary version detection / binary diagnostics (PATH, dangling-symlink leads, same as `harness_list` healthDetail) / ledger health (SQLite `integrity_check`, WAL size, per-status task stats) / config audit (current value vs default for all ~28 keys). Read-only throughout; a failing check never takes down the rest of the report.
+- **`harness_status` summary mode** — `summary` parameter (default `true`) renders one line per task (taskId / harness / status / duration / cost+tokens) so a human can scan it at a glance; `summary=false` keeps the original raw JSON output.
+- **One-command deploy** — `npm run deploy`: build + full test suite + rsync the built artifacts to `~/.openclaw/extensions/harness-bridge` (excluding `node_modules`/`.git`/`src`/tests), then prints a smoke-test reminder (restart the gateway to load the new build).
+- **Alert actionability** — `scripts/hb_notify.sh` overhaul: every alert now carries a source marker (`[harness告警·task-failed]` / `·stall` / `·watchdog` / `·selfcheck`, `[harness通知·task-success]`); the daily report gets its own `daily_report` branch (`[harness日报]` title, renders the report verbatim) instead of falling into the `task_failed` branch; bare `?` fallbacks replaced with explicit placeholders (`(no task id)`, `no exit code (startup failure)`, `(unknown harness)`, …); `task_failed` renders always includes the fail reason (`HB_FAIL_REASON`), the absolute log path and a follow-up hint (`详情: harness_status taskId=xxx`).
+- **Throttle information preservation** — the 60s per-harness notify window now also accumulates the suppressed taskIds (capped at 20): the next delivered alert for the same harness ends with `(60s window: N more tasks suppressed: id1, id2, …)` instead of a bare count, then the list resets.
+- **Daily report type marker** — the ledger daily-report sender now passes `HB_ALERT=daily_report`, so the report no longer gets rendered as a task failure by the notify script (production incident fix: the deployed copy of the script had no `task_success` branch either, so long-task success notices were misrendered as 「任务失败 ?·?」).
+- **Config audit** — all config keys verified to have usable defaults (zero-config runnable); the full key/default/description table ships in [docs/config-reference.md](docs/config-reference.md) and the `harness_doctor` config check reports current-vs-default per key.
+- **Code slimming** — deduplicated shared logic across runners: base task-record construction (`buildBaseTaskRecord`), timestamp-id generation (`timestampId`), prompt truncation, and the dsh headless settle/notify epilogue.
 
 ## What's new in v0.4.6
 
@@ -163,18 +178,30 @@ The `mount` block declares the knowledge-directory mounting mechanism: `harness_
 
 ## Configuration (openclaw.json → plugins.entries["harness-bridge"].config)
 
+Every key is optional; each has a usable default (zero config runs). The authoritative
+key/default/description table lives in [docs/config-reference.md](docs/config-reference.md) —
+the same table `harness_doctor` audits against. Quick reference:
+
 | Key | Default | Description |
 |-----|---------|-------------|
 | `dataDir` | `~/.openclaw/harness-bridge` | Ledger / task logs / user adapters |
 | `adaptersDir` | `<dataDir>/adapters` | Extra adapter directory (overrides built-ins by filename) |
 | `paramsFile` | built-in dictionary | Model parameter dictionary (exact / prefix / defaults 3-tier matching + skip_patterns) |
-| `notifyCommand` | none | Shell command executed when a background task finishes (env: `HB_TASK_ID` / `HB_HARNESS` / `HB_STATUS` / `HB_EXIT_CODE` / `HB_SESSION_ID` / `HB_LOG_FILE`) |
+| `notifyCommand` | none | Shell command executed when a background task finishes or an alert fires (env: `HB_ALERT` + per-type `HB_*` vars, see "Alert channels") |
 | `defaultTimeoutMs` | 600000 | Default timeout for `harness_run` |
 | `defaultTimeoutByTaskType` | none | v0.4.4 — taskType → default timeout ms map (overrides built-ins when `timeoutMs` is omitted) |
 | `globalWorkspace` | none | v0.4.4 — fallback workspace for `harness_run` when `cwd` is omitted; unset → serve process default |
 | `successNotifyMinDurationMs` | 300000 | v0.4.4 — notify on success only when the task ran at least this long (`<=0` disables) |
 | `statusLineEnabled` | `true` | v0.4 — append a background-tasks status line to every outbound reply |
 | `taskboardFile` | none | v0.4 — markdown taskboard whose "in progress" section feeds the status line |
+| `turnPrepareEnabled` | `true` | v0.4.1 — per-turn background-task injection |
+| `metricsEnabled` | `true` | v0.4.1 — in-process metrics sampler |
+| `eventRetentionDays` | 30 | v0.4.1 — `task_event` retention days (0 = no cleanup) |
+| `agentOpsLogEnabled` / `agentOpsLogFile` / `agentOpsLogMaxBytes` / `agentOpsLogKeep` | `true` / `<dataDir>/agent-ops.log` / 10485760 / 7 | v0.4.5/6 — agent-ops log + rotation |
+| `dailyReport.enabled` / `dailyReport.hour` | `true` / 21 | v0.4.6 — daily ledger report push |
+| `healthWatchdog.enabled` / `healthWatchdog.intervalMs` | `true` / 300000 | v0.4.3 — periodic health probing |
+| `routing.*` | retry 1 (when the section exists) | v0.4.3 — routing rules / fallback chains / retry |
+| `timeouts.idleTimeoutMs` / `maxDurationMs` / `sessionCheckMaxRetries` | 300000 / 7200000 / 3 | v0.4.3 — HTTP two-level timeout |
 
 ## Alert channels
 
@@ -188,11 +215,20 @@ Machine-specific values are injected via env (never hardcoded in the script): `H
 
 | `HB_ALERT` | Trigger | Environment variables |
 |------------|---------|----------------------|
-| `task_failed` (default) | Task terminal failure / timeout | `HB_TASK_ID` `HB_HARNESS` `HB_STATUS` `HB_EXIT_CODE` `HB_SESSION_ID` `HB_LOG_FILE` `HB_FAIL_REASON` `HB_SUPPRESSED` `HB_ADVICE` `HB_HAS_OUTPUT` |
+| `task_failed` (default) | Task terminal failure / timeout | `HB_TASK_ID` `HB_HARNESS` `HB_STATUS` `HB_EXIT_CODE` `HB_SESSION_ID` `HB_LOG_FILE` `HB_FAIL_REASON` `HB_SUPPRESSED` `HB_SUPPRESSED_IDS` (v0.4.7) `HB_ADVICE` `HB_HAS_OUTPUT` |
 | `task_stall` | Session/process stalled (consecutive checks without progress; not auto-killed) | `HB_TASK_ID` `HB_SESSION_ID` `HB_DETAIL` `HB_TIME` |
 | `task_success` | v0.4.4 — long task finished successfully (duration ≥ `successNotifyMinDurationMs`) | `HB_TASK_ID` `HB_HARNESS` `HB_DURATION` `HB_COST_TOKENS` (when available) `HB_TIME` |
 | `health_change` | Watchdog health state transition | `HB_ADAPTER` `HB_STATE` `HB_PREV_STATE` `HB_DETAIL` `HB_TIME` |
 | `selfcheck` | Post-upgrade smoke self-check report | `HB_SELFCHECK` `HB_HOST_VERSION` `HB_DETAIL` `HB_TIME` |
+| `daily_report` | v0.4.7 — ledger daily report (pushed by the built-in timer) | `HB_NOTIFY` (report text) `HB_REPORT_DATE` |
+
+v0.4.7 rendering contract (bundled script): every alert title carries a source marker —
+`[harness告警·task-failed]` / `[harness告警·stall]` / `[harness告警·watchdog]` /
+`[harness告警·selfcheck]` / `[harness通知·task-success]` / `[harness日报]`; unset variables
+render as explicit placeholders (`(no task id)`, `no exit code (startup failure)`, …) instead
+of a bare `?`; `task_failed` always includes the fail reason, the absolute log path and a
+`详情: harness_status taskId=xxx` follow-up hint; suppressed alerts list the suppressed task
+ids: `(60s window: N more tasks suppressed: id1, id2, …)`.
 
 ## Ledger and logs
 
@@ -211,6 +247,7 @@ npm install
 npm run plugin:build     # tsc + generate manifest metadata
 npm run plugin:validate
 npm test
+npm run deploy           # v0.4.7 — build + test + rsync to ~/.openclaw/extensions/harness-bridge (restart the gateway afterwards)
 ```
 
 Install into your gateway locally:

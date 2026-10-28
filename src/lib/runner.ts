@@ -5,10 +5,20 @@ import type { Adapter } from "./adapters.js";
 import type { Ledger, TaskRecord, TaskStatus, TimeoutSource, WorkspaceSource } from "./ledger.js";
 import { classifyFailure, failureAdvice } from "./resilience.js";
 
-export function newTaskId(now: Date = new Date()): string {
+/** v0.4.7 时间戳 id 生成（taskId / dsh sessionId 共用）：hb_20260101T000000Z_ab12 */
+export function timestampId(prefix: string, randLen = 4, now: Date = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   const ts = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}Z`;
-  return `hb_${ts}_${Math.random().toString(36).slice(2, 6)}`;
+  return `${prefix}_${ts}_${Math.random().toString(36).slice(2, 2 + randLen)}`;
+}
+
+export function newTaskId(now: Date = new Date()): string {
+  return timestampId("hb", 4, now);
+}
+
+/** v0.4.7 prompt 截断共用（台账 prompt 列 500 字符封顶） */
+export function truncatePrompt(prompt: string): string {
+  return prompt.length > 500 ? `${prompt.slice(0, 500)}…` : prompt;
 }
 
 /** argv 模板占位替换（整段或内嵌 {prompt}/{sessionId}）；argv 数组避免 shell 注入 */
@@ -113,6 +123,39 @@ export function timeoutRecordFields(
 }
 
 /**
+ * v0.4.7 http / stdio-rpc runner 共用的 running 快照基记录（进程型 transport：
+ * pid = 网关进程号，cli runner 的 spawn 子进程语义不同，不共用）。
+ */
+export function buildBaseTaskRecord(input: {
+  id: string;
+  adapterId: string;
+  transport: TaskRecord["transport"];
+  prompt: string;
+  cwd?: string;
+  startedAt: string;
+  logFile: string;
+  timeoutMs: number;
+  timeoutSource?: TimeoutSource;
+  fallbackUsed?: boolean;
+}): TaskRecord {
+  return {
+    id: input.id,
+    harness: input.adapterId,
+    transport: input.transport,
+    prompt: truncatePrompt(input.prompt),
+    cwd: input.cwd,
+    status: "running",
+    pid: process.pid,
+    createdAt: input.startedAt,
+    startedAt: input.startedAt,
+    logFile: input.logFile,
+    title: `${input.id}; ${input.prompt.slice(0, 60)}`,
+    ...timeoutRecordFields(input.timeoutMs, input.timeoutSource),
+    ...(input.fallbackUsed ? { fallbackUsed: true } : {}),
+  };
+}
+
+/**
  * v0.4.4 工作区三级解析：显式 cwd > globalWorkspace 兜底 > serve 进程默认（undefined）。
  * 语义反转：编码任务默认在目标项目文件夹，不再兜底插件数据目录。
  */
@@ -137,6 +180,30 @@ export function formatDuration(ms: number): string {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m${s % 60}s`;
   return `${Math.floor(m / 60)}h${m % 60}m`;
+}
+
+/**
+ * v0.4.7 摘要模式：一行一任务（taskId / harness / 状态 / 耗时 / 成本），方便人扫读。
+ * running 任务无 durationMs 时按 startedAt 计算已运行时长；成本显示 cost 与 token 合计（缺失显示 —）。
+ */
+export function formatTaskLine(rec: TaskRecord): string {
+  const durMs =
+    rec.durationMs ??
+    (rec.startedAt ? Date.now() - Date.parse(rec.startedAt) : null);
+  const dur =
+    durMs != null && Number.isFinite(durMs) && durMs >= 0 ? formatDuration(durMs) : "—";
+  const cost = rec.costTotal ?? rec.cost;
+  const tokens = totalTokens(rec);
+  const costParts: string[] = [];
+  if (cost != null) costParts.push(`cost ${cost}`);
+  if (tokens != null) costParts.push(`${tokens} tok`);
+  return [
+    rec.id,
+    rec.harness,
+    rec.status,
+    `耗时 ${dur}`,
+    costParts.length > 0 ? costParts.join(" / ") : "成本 —",
+  ].join(" ｜ ");
 }
 
 function buildArgv(opts: RunOptions): string[] {
@@ -172,9 +239,15 @@ function finalize(
 /**
  * v0.4.1 失败告警节流：per-harness 滑动窗口，窗口内同 harness 只推一条，
  * 被抑制的失败计数并入下一条通知（防批量任务失败时的微信轰炸）。
+ * v0.4.7 信息保全：被抑制告警同时攒 taskId 列表（上限 SUPPRESSED_IDS_CAP，
+ * 超出只记条数），随下一条告警列出（HB_SUPPRESSED_IDS），发出后清空。
  */
 const NOTIFY_WINDOW_MS = 60_000;
-const notifyState = new Map<string, { lastTs: number; suppressed: number }>();
+const SUPPRESSED_IDS_CAP = 20;
+const notifyState = new Map<
+  string,
+  { lastTs: number; suppressed: number; suppressedIds: string[] }
+>();
 
 export function resetNotifyThrottle(): void {
   notifyState.clear();
@@ -231,10 +304,12 @@ export function notify(
   const st = notifyState.get(key);
   if (st && now - st.lastTs < NOTIFY_WINDOW_MS) {
     st.suppressed += 1;
+    if (st.suppressedIds.length < SUPPRESSED_IDS_CAP) st.suppressedIds.push(rec.id);
     return; // 窗口内已通知过该 harness，抑制本次
   }
   const suppressed = st?.suppressed ?? 0;
-  notifyState.set(key, { lastTs: now, suppressed: 0 });
+  const suppressedIds = st?.suppressedIds ?? [];
+  notifyState.set(key, { lastTs: now, suppressed: 0, suppressedIds: [] });
   // v0.4.3 超时类失败（failReason 含 timeout）告警附建议：任务过大请拆分
   const advice = failureAdvice(classifyFailure(rec));
   const env = {
@@ -246,7 +321,12 @@ export function notify(
     HB_SESSION_ID: rec.sessionId ?? "",
     HB_LOG_FILE: rec.logFile ?? "",
     HB_FAIL_REASON: rec.failReason ?? "",
-    HB_SUPPRESSED: suppressed > 0 ? String(suppressed) : "",
+    ...(suppressed > 0
+      ? {
+          HB_SUPPRESSED: String(suppressed),
+          ...(suppressedIds.length > 0 ? { HB_SUPPRESSED_IDS: suppressedIds.join(", ") } : {}),
+        }
+      : {}),
     ...(advice ? { HB_ADVICE: advice } : {}),
     ...(rec.hasOutput === true ? { HB_HAS_OUTPUT: "1" } : {}),
   };
@@ -315,7 +395,7 @@ export function runTask(opts: RunOptions): TaskRecord {
   const base: TaskRecord = {
     id,
     harness: opts.adapter.id,
-    prompt: opts.prompt.length > 500 ? `${opts.prompt.slice(0, 500)}…` : opts.prompt,
+    prompt: truncatePrompt(opts.prompt),
     cwd: opts.cwd,
     status: "running",
     startedAt,

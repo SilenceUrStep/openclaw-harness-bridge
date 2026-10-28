@@ -1,6 +1,6 @@
 {
   "name": "openclaw-plugin-harness-bridge",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Register, configure, delegate and monitor coding-agent harnesses from OpenClaw.",
   "type": "module",
   "private": true,
@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "plugin:build": "npm run build && openclaw plugins build --entry ./dist/index.js",
     "plugin:validate": "npm run build && openclaw plugins validate --entry ./dist/index.js",
-    "test": "vitest run --config ./vitest.config.ts"
+    "test": "vitest run --config ./vitest.config.ts",
+    "deploy": "npm run build && npm test && mkdir -p ~/.openclaw/extensions/harness-bridge && rsync -a --delete --exclude node_modules --exclude .git --exclude src --exclude tests --exclude docs --exclude reports --exclude '*.test.ts' --exclude vitest.config.ts --exclude tsconfig.json --exclude package-lock.json ./ ~/.openclaw/extensions/harness-bridge/ && echo '--- deployed to ~/.openclaw/extensions/harness-bridge ---' && echo 'SMOKE HINT: restart the gateway to load the new build (openclaw gateway restart), then verify: openclaw plugins inspect harness-bridge --runtime'"
   },
   "files": [
     "dist",

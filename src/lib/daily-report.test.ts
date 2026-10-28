@@ -1,9 +1,14 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi, beforeEach } from "vitest";
 import { buildDailyReport } from "./daily-report.js";
 import { Ledger, type TaskRecord } from "./ledger.js";
+
+const spawnMock = vi.fn();
+vi.mock("node:child_process", () => ({
+  spawn: (...args: unknown[]) => spawnMock(...args),
+}));
 
 const dirs: string[] = [];
 
@@ -103,5 +108,45 @@ describe("buildDailyReport（v0.4.6 台账日报）", () => {
     const report = buildDailyReport(l.dbPath);
     expect(report).toContain(`台账日报 ${yest.slice(5)}`);
     expect(report).toContain("任务：1 个｜成功 1｜失败 0｜成功率 100%");
+  });
+});
+
+describe("registerDailyReport 推送类型标记（v0.4.7）", () => {
+  beforeEach(() => {
+    spawnMock.mockReset();
+    spawnMock.mockReturnValue({ unref: () => {} });
+  });
+
+  it("推送时 env 带 HB_ALERT=daily_report，不再掉进 task_failed 分支", async () => {
+    const { registerDailyReport } = await import("./daily-report.js");
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-daily-push-"));
+    dirs.push(dir);
+    const l = new Ledger(path.join(dir, "ledger.db"));
+    const now = new Date().toLocaleString("sv-SE", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const today = now.slice(0, 10);
+    const curHour = Number(now.slice(11, 13));
+    // 今日已过整点即可触发（tick 立即执行一次）：把 hour 设为当前小时
+    l.append(rec({ id: "p1", harness: "opencode", status: "success", createdAt: new Date(Date.now() - 86400_000).toISOString() }));
+    await l.close();
+    registerDailyReport({
+      cfg: { dailyReport: { hour: curHour } },
+      ledgerDbPath: path.join(dir, "ledger.db"),
+      notifyCommand: "echo sent",
+    });
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const opts = spawnMock.mock.calls[0][2] as { env: Record<string, string> };
+    expect(opts.env.HB_ALERT).toBe("daily_report");
+    expect(opts.env.HB_REPORT_DATE).toBe(today);
+    expect(opts.env.HB_NOTIFY).toContain("台账日报");
+    expect(opts.env.HB_NOTIFY).toContain("任务：1 个｜成功 1｜失败 0｜成功率 100%");
   });
 });

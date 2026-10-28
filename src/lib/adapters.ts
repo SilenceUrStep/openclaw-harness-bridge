@@ -159,6 +159,16 @@ export interface BridgeConfig {
   agentOpsLogKeep?: number;
   /** v0.4.6 台账日报推送（默认开启，每天 21 点 Asia/Shanghai 经 notifyCommand 推送） */
   dailyReport?: DailyReportConfig;
+  /** v0.4 出站消息追加后台任务状态行（默认开启，false 关闭） */
+  statusLineEnabled?: boolean;
+  /** v0.4 markdown taskboard 路径：状态行合并其「进行中」段 + harness_run 自动登记 */
+  taskboardFile?: string;
+  /** v0.4.1 每回合 agent_turn_prepare 注入后台任务清单（默认开启，false 关闭） */
+  turnPrepareEnabled?: boolean;
+  /** v0.4.1 进程内观测采样器（默认开启，false 关闭） */
+  metricsEnabled?: boolean;
+  /** v0.4.1 task_event 事件流水保留天数，默认 30，0=不清理 */
+  eventRetentionDays?: number;
 }
 
 export function expandHome(p: string): string {

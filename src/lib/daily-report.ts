@@ -168,8 +168,15 @@ export function registerDailyReport(opts: DailyReportOptions): void {
       const cmd = opts.notifyCommand;
       if (!cmd) return; // 未配置推送通道，跳过（不标记已发）
       const report = buildDailyReport(opts.ledgerDbPath);
+      // v0.4.7 补 HB_ALERT 类型标记：通知脚本按 daily_report 分支直接渲染报告原文，
+      // 不再因缺类型掉进 task_failed 分支被误报成「任务失败」
       const child = spawn("bash", ["-c", cmd], {
-        env: { ...process.env, HB_NOTIFY: report, HB_REPORT_DATE: now.date },
+        env: {
+          ...process.env,
+          HB_ALERT: "daily_report",
+          HB_NOTIFY: report,
+          HB_REPORT_DATE: now.date,
+        },
         stdio: "ignore",
       });
       child.unref?.();

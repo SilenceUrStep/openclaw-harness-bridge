@@ -64,10 +64,20 @@ harness_status { }                                        // 查进度 / 结果
 | 工具 | 作用 |
 |------|------|
 | `harness_list` | 列出已注册 harness 及健康状态（二进制/版本/配置文件存在性） |
+| `harness_doctor` | v0.4.7 一键体检：adapter 探活 / 宿主与 binary 版本 / binary 诊断（PATH、悬空链接线索）/ 台账健康（SQLite 完整性、WAL、任务统计）/ 配置校验（当前值 vs 默认值），✅/⚠️/❌ 分级 + 修复建议 |
 | `harness_sync_models` | 按统一参数字典校准各 harness 模型配置（报告 / 字段级 merge 写回 / 切默认模型） |
 | `harness_run` | 委派任务（默认后台执行 + 台账；`wait=true` 同步等待） |
-| `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部） |
+| `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部）；v0.4.7 默认摘要模式：一行一任务（taskId/harness/状态/耗时/成本），`summary=false` 返回原始 JSON |
 | `harness_mount` | 把共享知识库目录挂载进 harness（external_directory 放行 + instructions 注入；dry-run/apply，幂等） |
+
+## v0.4.7 新特性
+
+- **harness_doctor 一键体检** — 五项检查收口成一个工具，人话报告（每项一行结论 + ✅/⚠️/❌ 分级 + 异常修复建议）：adapter 探活健康 / 宿主与 binary 版本探测 / binary 诊断（PATH、悬空符号链接线索，同 harness_list healthDetail）/ 台账健康（SQLite 完整性、WAL 大小、任务统计）/ 配置校验（全部配置键当前值 vs 默认值）。全程只读，单项失败不拖垮整个报告。
+- **告警可行动性改造** — `scripts/hb_notify.sh`：每条告警标题带来源标记（`[harness告警·task-failed]` / `·stall` / `·watchdog` / `·selfcheck`、`[harness通知·task-success]`）；日报新增 `daily_report` 分支（`[harness日报]` 标题直接渲染报告原文），不再掉进 task_failed 分支；裸 `?` 兜底改为显性说明（`(no task id)`、`no exit code (startup failure)` 等）；task_failed 必带失败原因（HB_FAIL_REASON）+ 日志绝对路径 + 查询提示（`详情: harness_status taskId=xxx`）。日报发送方同时补传 `HB_ALERT=daily_report`（生产误报「任务失败 ?·?」双端修复）。
+- **节流抑制信息保全** — 60s 节流窗口被抑制的告警除条数外还攒 taskId 列表（封顶 20 条）：下条同 harness 告警末尾列出 `(60s window: N more tasks suppressed: id1, id2, …)`，随后清空。
+- **一键发版** — `npm run deploy`：build + 全量测试 + rsync 部署到 `~/.openclaw/extensions/harness-bridge`（排除 node_modules/.git/src/tests），完成后输出冒烟提示（需重启网关生效）。
+- **配置零配置可用审计** — 全部配置键确认有合理默认值（不配置也能跑），键/默认值/说明清单见 [docs/config-reference.md](docs/config-reference.md)，`harness_doctor` 配置校验逐键对比当前值与默认值。
+- **代码瘦身** — runner 层去重：base 任务记录构造（`buildBaseTaskRecord`）、时间戳 id 生成（`timestampId`）、prompt 截断、dsh headless 结算/通知收口。
 
 ## v0.4.4 新特性
 

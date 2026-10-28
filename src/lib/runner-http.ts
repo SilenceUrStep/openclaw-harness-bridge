@@ -11,7 +11,13 @@ import {
   type TimeoutSource,
 } from "./ledger.js";
 import { buildHttpHeaders, type HttpTransport } from "./transport.js";
-import { newTaskId, notify, sendStallAlert, timeoutRecordFields } from "./runner.js";
+import {
+  buildBaseTaskRecord,
+  newTaskId,
+  notify,
+  sendStallAlert,
+  truncatePrompt,
+} from "./runner.js";
 
 const SSE_ACCEPT = "text/event-stream";
 const EVENT_FLUSH_BATCH = 25;
@@ -418,20 +424,19 @@ export async function runHttpTask(opts: HttpRunOptions): Promise<TaskRecord> {
   const startedAt = new Date().toISOString();
   const logFile = path.join(opts.tasksDir, `${id}.log`);
   const base: TaskRecord = {
-    id,
-    harness: opts.adapter.id,
-    transport: "http",
-    prompt: opts.prompt.length > 500 ? `${opts.prompt.slice(0, 500)}…` : opts.prompt,
-    cwd: opts.cwd,
-    status: "running",
-    pid: process.pid,
-    createdAt: startedAt,
-    startedAt,
-    logFile,
-    title: `${id}; ${opts.prompt.slice(0, 60)}`,
+    ...buildBaseTaskRecord({
+      id,
+      adapterId: opts.adapter.id,
+      transport: "http",
+      prompt: opts.prompt,
+      cwd: opts.cwd,
+      startedAt,
+      logFile,
+      timeoutMs: opts.timeoutMs,
+      timeoutSource: opts.timeoutSource,
+      fallbackUsed: opts.fallbackUsed,
+    }),
     ...(opts.forkFromSessionId ? { forkedFrom: opts.forkFromSessionId } : {}),
-    ...timeoutRecordFields(opts.timeoutMs, opts.timeoutSource),
-    ...(opts.fallbackUsed ? { fallbackUsed: true } : {}),
   };
   opts.ledger.append(base);
   const exec = executeHttpTask(opts, base);
