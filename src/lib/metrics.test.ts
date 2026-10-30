@@ -87,3 +87,114 @@ describe("MetricsSampler", () => {
     expect(s.loadFromDisk(`/tmp/hb-nonexistent-${Date.now()}.json`)).toBe(false);
   });
 });
+
+describe("MetricsSampler.archiveToDisk（v0.4.10）", () => {
+  /** 本地时区当天日期键（YYYYMMDD），与 metrics.ts localDateKey 同逻辑 */
+  function todayKey(): string {
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+  }
+
+  it("归档文件创建且内容含当天采样", () => {
+    const { mkdtempSync, rmSync, existsSync, readFileSync } = require("node:fs");
+    const { tmpdir } = require("node:os");
+    const path = require("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-metrics-arch-"));
+    try {
+      const s = new MetricsSampler();
+      s.start();
+      try {
+        const archiveDir = path.join(dir, "metrics-archive");
+        const metricsFile = path.join(dir, "metrics.json");
+        expect(s.archiveToDisk(metricsFile, archiveDir)).toBe(true);
+        const file = path.join(archiveDir, `metrics-${todayKey()}.json`);
+        expect(existsSync(file)).toBe(true);
+        expect(existsSync(`${file}.tmp`)).toBe(false); // 原子写不留 tmp
+        const data = JSON.parse(readFileSync(file, "utf8")) as {
+          archivedAt: string;
+          date: string;
+          samples: Array<{ ts: string; rssMb: number }>;
+        };
+        expect(data.date).toBe(todayKey());
+        expect(typeof data.archivedAt).toBe("string");
+        expect(data.samples.length).toBeGreaterThanOrEqual(1);
+        expect(data.samples.every((x) => x.ts.startsWith(String(new Date().getFullYear())))).toBe(true);
+        expect(data.samples[0]!.rssMb).toBeGreaterThan(0);
+      } finally {
+        s.stop();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("同日重复调用幂等：已有归档不被覆盖", () => {
+    const { mkdtempSync, rmSync, readFileSync } = require("node:fs");
+    const { tmpdir } = require("node:os");
+    const path = require("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-metrics-arch-"));
+    try {
+      const s = new MetricsSampler();
+      s.start();
+      try {
+        const archiveDir = path.join(dir, "metrics-archive");
+        const metricsFile = path.join(dir, "metrics.json");
+        expect(s.archiveToDisk(metricsFile, archiveDir)).toBe(true);
+        const file = path.join(archiveDir, `metrics-${todayKey()}.json`);
+        const first = readFileSync(file, "utf8");
+        expect(s.archiveToDisk(metricsFile, archiveDir)).toBe(true); // 同日再归档应跳过
+        expect(readFileSync(file, "utf8")).toBe(first); // 内容不变
+      } finally {
+        s.stop();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("过期归档被清理（archiveDays=30）", () => {
+    const { mkdtempSync, rmSync, mkdirSync, writeFileSync, utimesSync, existsSync } = require("node:fs");
+    const { tmpdir } = require("node:os");
+    const path = require("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-metrics-arch-"));
+    try {
+      const archiveDir = path.join(dir, "metrics-archive");
+      mkdirSync(archiveDir, { recursive: true });
+      // 40 天前的过期归档 + 一个不匹配命名模式的文件（不应被误删）
+      const oldFile = path.join(archiveDir, "metrics-20200101.json");
+      writeFileSync(oldFile, "{}", "utf8");
+      const old = new Date(Date.now() - 40 * 86_400_000);
+      utimesSync(oldFile, old, old);
+      const otherFile = path.join(archiveDir, "other.json");
+      writeFileSync(otherFile, "{}", "utf8");
+      const s = new MetricsSampler();
+      s.start();
+      try {
+        expect(s.archiveToDisk(path.join(dir, "metrics.json"), archiveDir, 30)).toBe(true);
+        expect(existsSync(oldFile)).toBe(false); // 过期归档被清理
+        expect(existsSync(otherFile)).toBe(true); // 非 metrics-*.json 不清理
+        expect(existsSync(path.join(archiveDir, `metrics-${todayKey()}.json`))).toBe(true); // 当天归档仍在
+      } finally {
+        s.stop();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("当天无采样不建空归档", () => {
+    const { mkdtempSync, rmSync, existsSync } = require("node:fs");
+    const { tmpdir } = require("node:os");
+    const path = require("node:path");
+    const dir = mkdtempSync(path.join(tmpdir(), "hb-metrics-arch-"));
+    try {
+      const s = new MetricsSampler(); // 不 start，缓冲为空
+      const archiveDir = path.join(dir, "metrics-archive");
+      expect(s.archiveToDisk(path.join(dir, "metrics.json"), archiveDir)).toBe(true);
+      expect(existsSync(archiveDir)).toBe(false); // 连目录都不建
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

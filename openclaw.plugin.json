@@ -2,7 +2,7 @@
   "id": "harness-bridge",
   "name": "Harness Bridge",
   "description": "Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, ...) from OpenClaw.",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "configSchema": {
     "type": "object",
     "properties": {
@@ -57,7 +57,21 @@
       },
       "metricsEnabled": {
         "type": "boolean",
-        "description": "v0.4.1 进程内观测采样器：内存/事件循环延迟每分钟采样，环形缓冲24h（默认开启）"
+        "description": "v0.4.1 进程内观测采样器（v0.4.10 起改由 sampler.enabled 控制，默认关闭）"
+      },
+      "sampler": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "v0.4.10 观测采样器开关，默认关闭；开启后每分钟采样并按天归档"
+          },
+          "archiveDays": {
+            "type": "number",
+            "description": "v0.4.10 采样归档保留天数，超期归档文件自动清理"
+          }
+        },
+        "description": "v0.4.10 观测采样器配置（不配置则采样器完全不启动）"
       },
       "eventRetentionDays": {
         "type": "number",

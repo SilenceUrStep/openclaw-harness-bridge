@@ -1,7 +1,7 @@
 import { monitorEventLoopDelay, type ELDHistogram } from "node:perf_hooks";
 import { memoryUsage } from "node:process";
 import { getHeapStatistics } from "node:v8";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 
 /**
  * v0.4.1 观测采样器：网关进程内每分钟采样内存与事件循环延迟，
@@ -38,6 +38,11 @@ export interface MetricsSummary {
 }
 
 const MB = 1024 * 1024;
+
+/** v0.4.10 本地时区日期键（YYYYMMDD），按天归档用 */
+function localDateKey(d: Date): string {
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+}
 
 export class MetricsSampler {
   private histogram: ELDHistogram | null = null;
@@ -156,6 +161,45 @@ export class MetricsSampler {
         return true;
       }
       return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * v0.4.10 按天归档：把缓冲中当天的采样写 <archiveDir>/metrics-YYYYMMDD.json（原子写 tmp+rename，与 saveToDisk 同风格），
+   * 破解覆盖写只能留 24h 窗口的问题；同日重复调用幂等跳过，当天无采样不建空归档；
+   * 顺带清理 archiveDir 下修改时间超过 archiveDays 天的 metrics-*.json。
+   * 全程 fail-open：失败返回 false，观测自身绝不影响网关。
+   */
+  archiveToDisk(metricsFile: string, archiveDir: string, archiveDays = 30): boolean {
+    try {
+      // 清理过期归档（修改时间超过 archiveDays 天的 metrics-*.json，单文件失败不影响整体）
+      const cutoff = Date.now() - archiveDays * 86_400_000;
+      if (existsSync(archiveDir)) {
+        for (const f of readdirSync(archiveDir)) {
+          if (!/^metrics-\d{8}\.json$/.test(f)) continue;
+          try {
+            if (statSync(`${archiveDir}/${f}`).mtimeMs < cutoff) unlinkSync(`${archiveDir}/${f}`);
+          } catch {
+            // 单个归档清理失败不影响其余文件
+          }
+        }
+      }
+      const date = localDateKey(new Date());
+      const archiveFile = `${archiveDir}/metrics-${date}.json`;
+      if (existsSync(archiveFile)) return true; // 幂等：当天归档已存在则跳过
+      // 当天采样归属按本地时区判定（sample.ts 为 UTC ISO 串）
+      const todays = this.buffer.filter((s) => {
+        const t = Date.parse(s.ts);
+        return !Number.isNaN(t) && localDateKey(new Date(t)) === date;
+      });
+      if (todays.length === 0) return true; // 当天无采样不建空归档
+      mkdirSync(archiveDir, { recursive: true });
+      const tmp = `${archiveFile}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ archivedAt: new Date().toISOString(), date, samples: todays }), "utf8");
+      renameSync(tmp, archiveFile);
+      return true;
     } catch {
       return false;
     }

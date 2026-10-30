@@ -134,6 +134,18 @@ const configSchema = Type.Object({
       description: "v0.4.1 进程内观测采样器：内存/事件循环延迟每分钟采样，环形缓冲24h（默认开启）",
     }),
   ),
+  sampler: Type.Optional(
+    Type.Object({
+      enabled: Type.Optional(
+        Type.Boolean({
+          description: "v0.4.10 观测采样器开关，默认关闭；开启后每分钟采样并按天归档",
+        }),
+      ),
+      archiveDays: Type.Optional(
+        Type.Number({ description: "v0.4.10 采样归档保留天数，超期归档文件自动清理" }),
+      ),
+    }),
+  ),
   eventRetentionDays: Type.Optional(
     Type.Number({
       description: "v0.4.1 task_event 事件流水保留天数，默认 30，0 表示不清理",
@@ -870,6 +882,8 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
       turnPrepareEnabled?: boolean;
       metricsEnabled?: boolean;
       eventRetentionDays?: number;
+      /** v0.4.10 观测采样器开关（默认 false，不配置则采样器完全不启动） */
+      sampler?: { enabled?: boolean; archiveDays?: number };
     };
     const dataDir = resolveDataDir(cfg);
     const ledgerDbPath = path.join(dataDir, "ledger.db");
@@ -914,8 +928,9 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
       });
     }
 
-    // v0.4.1 观测采样器：内存/事件循环延迟每分钟采样，环形缓冲 24h
-    if (cfg.metricsEnabled !== false) {
+    // v0.4.10 观测采样器：默认关闭（不配置 sampler 则完全不启动）；
+    // sampler.enabled 开启后内存/事件循环延迟每分钟采样，环形缓冲 24h，并每小时落盘 + 按天归档
+    if (cfg.sampler?.enabled === true) {
       try {
         metricsSampler.start();
         // v0.4.2 落盘：启动恢复 + 每小时持久化，网关重启观测数据不断档
@@ -925,6 +940,16 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
         metricsSaveTimer = setInterval(() => {
           try {
             metricsSampler.saveToDisk(metricsFile);
+            // v0.4.10 每小时落盘时顺带按天归档 + 清理过期归档（失败不影响落盘）
+            try {
+              metricsSampler.archiveToDisk(
+                metricsFile,
+                path.join(dataDir, "metrics-archive"),
+                cfg.sampler?.archiveDays ?? 30,
+              );
+            } catch {
+              // 归档失败不影响落盘
+            }
           } catch {
             // 落盘失败不影响采样
           }
@@ -1122,15 +1147,18 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
       } catch {
         // ignore
       }
-      try {
-        metricsSampler.saveToDisk(path.join(dataDir, "metrics.json"));
-      } catch {
-        // ignore
-      }
-      try {
-        metricsSampler.stop();
-      } catch {
-        // ignore
+      // v0.4.10 采样器关闭时安全跳过（未启动即无数据可 flush）
+      if (cfg.sampler?.enabled === true) {
+        try {
+          metricsSampler.saveToDisk(path.join(dataDir, "metrics.json"));
+        } catch {
+          // ignore
+        }
+        try {
+          metricsSampler.stop();
+        } catch {
+          // ignore
+        }
       }
       if (cleanupTimer) {
         clearInterval(cleanupTimer);
