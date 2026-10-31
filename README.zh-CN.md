@@ -4,7 +4,7 @@
 
 从 OpenClaw 助手注册、配置、委派并监控多个编码 agent harness（OpenCode、Claude Code、Codex CLI 等）。
 
-> **状态**：v0.4.0 生产运行中 · RFC 社区评审中 — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
+> **状态**：v0.4.12 生产运行中 · RFC 社区评审中 — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
 >
 > 设计背景与社区讨论稿见 [docs/RFC.md](docs/RFC.md)（v0.1）· [docs/RFC-v0.3.md](docs/RFC-v0.3.md)（v0.3：SDK 级管理）
 
@@ -22,7 +22,7 @@ OpenClaw 官方已有三层接入外部 agent 的机制（Agent Harness SDK / CL
 从 ClawHub 安装：
 
 ```bash
-openclaw plugins install clawhub:openclaw-plugin-harness-bridge
+openclaw plugins install openclaw-plugin-harness-bridge
 ```
 
 或从本地目录安装：
@@ -38,26 +38,64 @@ openclaw gateway restart
 openclaw plugins inspect harness-bridge --runtime
 ```
 
+最小 `openclaw.json` 配置——只有 `enabled` 也能完整工作（每个配置键都有默认值）：
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "harness-bridge": {
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+可选但推荐：加一个 `config.notifyCommand` 接收推送通知（不配置则插件静默运行——一切照常进台账，只是不推送）：
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "harness-bridge": {
+        "enabled": true,
+        "config": {
+          "notifyCommand": "bash <插件目录>/scripts/hb_notify.sh"
+        }
+      }
+    }
+  }
+}
+```
+
 ## 快速开始
 
-**开箱即用（零配置）：**
+**开箱即用（零配置）：** 每个配置键都有可用默认值（完整清单：[docs/config-reference.md](docs/config-reference.md)）；数据目录 `~/.openclaw/harness-bridge` 自动创建（SQLite 台账 + 任务日志 + agent-ops 日志 + 观测数据落盘）；v0.4 状态行默认开启（每条出站回复自动追加「后台任务：…」状态行，数据来自台账）；定时探活（5 分钟）、每小时 WAL checkpoint、台账日报定时器与事件保留（30 天）均默认开启。
 
-- 数据目录 `~/.openclaw/harness-bridge` 自动创建（SQLite 台账 + 任务日志）
-- 五个工具立即可用——跑 `harness_list` 查看各 adapter 健康状态
-- v0.4 状态行默认开启：每条出站回复自动追加「后台任务：…」状态行（数据来自台账）
+三步派发第一个任务：
 
-**可选配置（openclaw.json → plugins.entries["harness-bridge"].config）：**
+**第 1 步 — 确认 adapter 探活。** 对话中跑 `harness_list`：每个已注册 harness 报告健康状态（二进制/版本/配置文件存在性）；`harness_doctor` 输出一键体检报告。未安装的社区 stub（`claude-code` / `codex`）显示为 warn 级发现，不算 error。
 
-- `taskboardFile` — 把 markdown 任务台账的「进行中」段合并进状态行
-- `notifyCommand` — 后台任务完成时执行 shell 命令（webhook / 推送通知）
-- adapter 凭证 — 如 OpenCode HTTP transport 从网关环境变量读 `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD`
+**第 2 步 — （可选）配置 `notifyCommand`。** 不配置则插件静默运行——失败照样进台账，但不会推送。推荐：`"notifyCommand": "bash <插件目录>/scripts/hb_notify.sh"`（机器相关值经 `HB_NOTIFY_TARGET` / `HB_NOTIFY_CHANNEL` / `HB_NOTIFY_BIN` 注入；见「告警通道」）。任务超时按 `taskType` 解析（coding 45 分钟，其余 10 分钟）。可选加成：`taskboardFile` 把 markdown 任务台账「进行中」段并入状态行；adapter 凭证（如 OpenCode HTTP transport 从网关环境变量读 `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD`）留在网关环境即可。
 
-**第一次委派：**
+**第 3 步 — 派发第一个任务。**
 
 ```
 harness_run { "harness": "opencode", "prompt": "..." }   // 默认后台执行 + 台账
 harness_status { }                                        // 查进度 / 结果
 ```
+
+## 安全与权限
+
+本插件会执行/读取什么的透明说明——写给 ClawHub 人工审查者（帮助理解静态扫描 suspicious 标记的成因），也供安装前审计：
+
+- **spawn 子进程是插件的本体功能，不是异常行为。** 任务委派的实现方式就是启动你配置的 harness 二进制（`opencode`、`dsh`，或任意声明式 adapter 的 `delegate.run` 命令行）。此外还会 spawn：`git`（`worktree=true` 任务的 worktree 创建、`git status` 工作区产出探测）、`openclaw` CLI（v0.4.12 agent 唤醒经 `openclaw system event`，默认关闭）、以及你自己配置的 `notifyCommand` shell 命令。没有其他执行路径——被 spawn 的命令全部来自你本地可控的配置，绝无远端输入拼接。
+- **凭证从环境变量读取**（如 OpenCode HTTP transport 从网关环境变量读 `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD`，对你自己的 `opencode serve` 做 basic auth）。插件不硬编码、不打印日志、不落盘任何密钥。
+- **所有对外通知只经你自配的 `notifyCommand` 脚本发出。** 插件自身不调用任何第三方服务：告警载荷经 `HB_*` 环境变量交给你的脚本，发到哪完全由你的配置决定。对外网络访问仅限 adapter/配置文件中声明的 harness 端点（如本地 `opencode serve`）。
+- **数据全部留在本地。** SQLite 台账、任务日志、观测归档与 ops 日志都在插件数据目录下（默认 `~/.openclaw/harness-bridge`）；事件 payload 按字段 2KB 截断，默认 30 天自动清理。
+
+如果扫描器标记了 `spawn` / `exec`：对应的就是上述功能——编排插件不启动外部编码 agent 的进程就无法指挥它们干活。
 
 ## 工具
 
@@ -67,8 +105,28 @@ harness_status { }                                        // 查进度 / 结果
 | `harness_doctor` | v0.4.7 一键体检（v0.4.8 新增 worktree 残留检查）：adapter 探活 / 宿主与 binary 版本 / binary 诊断（PATH、悬空链接线索）/ 台账健康（SQLite 完整性、WAL、任务统计）/ worktree 残留 / 配置校验（当前值 vs 默认值），✅/⚠️/❌ 分级 + 修复建议 |
 | `harness_sync_models` | 按统一参数字典校准各 harness 模型配置（报告 / 字段级 merge 写回 / 切默认模型） |
 | `harness_run` | 委派任务（默认后台执行 + 台账；`wait=true` 同步等待；v0.4.8 `worktree=true` 在隔离 git worktree（分支 `hb-wt/<taskId>`）中执行） |
-| `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部）；v0.4.7 默认摘要模式：一行一任务（taskId/harness/状态/耗时/成本），`summary=false` 返回原始 JSON；v0.4.8 附带 worktree 隔离任务提示 |
+| `harness_status` | 查询任务台账（状态/退出码/会话 ID/耗时/输出尾部）；v0.4.7 默认摘要模式：一行一任务（taskId/harness/状态/耗时/成本），`summary=false` 返回原始 JSON；v0.4.8 附带 worktree 隔离任务提示；v0.4.11 `events` 查询默认只回最新 50 条事件（`limit` 上限 1000，附 `total`/`truncated`） |
 | `harness_mount` | 把共享知识库目录挂载进 harness（external_directory 放行 + instructions 注入；dry-run/apply，幂等） |
+| `harness_permission` | v0.4.12 — OpenCode 权限 ask 人工批准通道：`action=list` 列出挂起权限请求（requestID/sessionID/权限名/参数详情，尽量映射所属任务 taskId）；`action=reply` 审批（`once` 仅本次放行 / `always` 永久放行 / `reject` 拒绝）。配合 permission_ask 告警使用；挂起超 `permissionAsk.timeoutMs`（默认 30 分钟）自动 reject |
+
+## v0.4.12 新特性
+
+- **OpenCode 权限 ask 人工批准通道** — http 任务被权限 ask 挂起时不再无声卡死：runner 在循环内探测挂起权限（`GET /permission`），推送 `HB_ALERT=permission_ask`（每 requestID 一次；`HB_PERMISSION_DETAIL` 携带工具名 + 参数摘要）。新增 `harness_permission` 工具：`action=list` 列出挂起请求（尽量映射所属任务 taskId），`action=reply` 审批（`once` 仅本次放行 / `always` 永久放行）或 `reject` 拒绝。挂起超 `permissionAsk.timeoutMs`（默认 30 分钟）由守护自动 reject 并推一次性 `permission_timeout` 告警。配置：`permissionAsk.enabled`（默认开）/ `permissionAsk.timeoutMs`。
+- **任务终态唤醒 agent** — 任务到达终态后经 `openclaw system event --mode now` 向编排 agent 注入单行唤醒文本，agent 自动查收结果并收口，无需等下一轮用户输入。**默认关闭**（`wakeAgent.enabled`——同会话 writer 竞争等不稳定因素待消除；显式配置 `true` 启用）。`wakeAgent.sessionKey` 定向唤醒用户可见会话（如微信 direct 会话），收口报告真正可见；`direct:` 会话的唤醒文本「先发确认」指示自动携带从 sessionKey 提取的显式消息 target。成功唤醒需达 `successNotifyMinDurationMs` 门槛；失败/超时唤醒跟随 60s 通知节流；同任务同终态最多唤醒一次；`openclaw` CLI 异常只打一行 warning（fail-open）。
+
+## v0.4.11 新特性
+
+- **定时器泄漏修复** — 插件（重）注册把 7 类定时器（探活 watchdog / doctor 定时体检 / 台账日报 / WAL checkpoint / lost 清扫 / 观测落盘 / 事件保留）收口到防重入 register，网关 reload 不再叠加重复定时器；watchdog 状态与日报 sent-dates 持久化（原子写盘 fail-open）并随启动恢复。
+- **事件查询限流** — `harness_status events=<taskId>` 默认只回最新 50 条事件（`limit` 调整，上限 1000），附 `total`/`truncated`，长任务事件时间线不再撑爆模型上下文。
+- **台账与告警降噪** — `health_change` 事件仅在真实状态翻转或每小时快照时写入（288 → 24 条/天）；未安装的社区 stub（`claude-code` / `codex`）降级为 warn 级发现，不再触发告警推送。
+
+## v0.4.10 新特性
+
+- **观测采样器改造** — 采样器仅在 `sampler.enabled=true` 时启动（默认关闭——不配置则完全不启动采样定时器）。开启后照旧采样（内存/事件循环 p99 进 24h 环形缓冲，每小时落盘 `metrics.json`），并顺带按天归档到 `<dataDir>/metrics-archive/metrics-YYYYMMDD.json`（原子写/幂等/时区正确/fail-open）；超过 `sampler.archiveDays`（默认 30 天）的归档自动清理。
+
+## v0.4.9 新特性
+
+- 版本对齐发布（manifest/package 版本同步），无用户可见变更。
 
 ## v0.4.8 新特性
 
@@ -87,6 +145,16 @@ harness_status { }                                        // 查进度 / 结果
 - **配置零配置可用审计** — 全部配置键确认有合理默认值（不配置也能跑），键/默认值/说明清单见 [docs/config-reference.md](docs/config-reference.md)，`harness_doctor` 配置校验逐键对比当前值与默认值。
 - **代码瘦身** — runner 层去重：base 任务记录构造（`buildBaseTaskRecord`）、时间戳 id 生成（`timestampId`）、prompt 截断、dsh headless 结算/通知收口。
 
+## v0.4.6 新特性
+
+- **台账日报** — 内置定时器聚合前一日台账（任务总数/成功/失败/成功率/Token 用量/平均与最长耗时/至多 5 条失败明细），在 `dailyReport.hour`（默认 21:00，Asia/Shanghai）经 `notifyCommand` 推送微信友好摘要。配置：`dailyReport.enabled`（默认开）/ `dailyReport.hour`。全链路 fail-open；「当日已发」内存记重。
+- **agent-ops 日志轮转** — 每次写入前检查 ops 日志大小，超过 `agentOpsLogMaxBytes`（默认 10 MB）滚动 `.log → .1 → .2 …`，保留 `agentOpsLogKeep`（默认 7）份。轮转失败静默跳过（fail-open）。
+
+## v0.4.5 新特性
+
+- **agent-ops 日志 hook** — `before_tool_call` / `after_tool_call` 钩子把 agent 层工具调用（exec / edit / write / apply_patch / harness_run 等）自动打进统一 ops 日志（默认 `<dataDir>/agent-ops.log`，可经 `agentOpsLogFile` 配置），jlog 格式（`[agent-ops] [tool] 摘要 + 耗时`）。exec 记录截断的单行命令，文件工具记录路径，harness_run 记录 harness + taskId + 状态 + 耗时；只读工具（read / ls / grep / glob / memory_search）跳过以控噪。全链路 fail-open：日志失败绝不阻塞工具调用。配置：`agentOpsLogEnabled`（默认开）/ `agentOpsLogFile`。
+- **dsh adapter sdk 配置修复** — 内置 dsh adapter 的 `sdk.provider` 原为 `deepseek-official`，而 modelSync 注入的是 `tokenhub` provider；该不一致此前被 `DSH_PROVIDER` / `DSH_MODEL` 环境变量掩盖，网关重启缺失这些变量时以 `initialize` 失败（`paths[0] undefined`）显形。sdk 配置已对齐 modelSync 的 provider（`tokenhub` / `glm-5.3-flash`）。
+
 ## v0.4.4 新特性
 
 - **taskType 感知默认超时** — 未显式传 `timeoutMs` 时按任务类型取默认：coding → 45 分钟，general/analysis/search → 10 分钟，无 taskType → 10 分钟（保持现状）。可用 `defaultTimeoutByTaskType` 配置覆盖。实际生效值与来源（`explicit` / `taskType_default` / `global_default`）记入台账 task 行（`timeout_ms` / `timeout_source` 列）并记 `timeout_resolved` 事件；cli / dsh / http 三路统一解析。
@@ -96,6 +164,16 @@ harness_status { }                                        // 查进度 / 结果
 - **WAL 定期 checkpoint** — 台账每小时执行 `PRAGMA wal_checkpoint(TRUNCATE)`（失败 fail-open），防长驻进程 WAL 无限膨胀；`checkpoint` 事件记录 WAL 页数。
 - **opencode 版本探测修复** — 新版 SDK 版本端点为 `GET /global/health`（旧 `/version` 已变成网页 SPA HTML）。探测顺序：显式 `versionPath` → `/global/health` → `/version`，纯文本仅在形似版本时采信；确实拿不到时显性输出「版本探测不可用」而非含糊的「未知」。
 - **dsh 进程判定器** — dsh 超时不再直接判死：先查进程存活——已退 → 按退出码结算（0=success 非 0=failed）；存活但 RPC 连续 N 次探活无响应（默认 3，复用 `sessionCheckMaxRetries`）→ 标记 stalled 并告警（不自动杀进程，人工介入）；恢复响应 → 正常结算。opencode 会话核查判定器与 dsh 进程判定器并列，runner 层只按 transport 调度。
+
+## v0.4.3 新特性
+
+- **能力路由** — adapter 声明 `capabilities`（如 opencode=`["coding"]`，dsh=`["general","analysis","search"]`）；`harness_run` 支持可选 `taskType`；优先级：显式 harness > taskType 匹配 > 默认。声明式 `routing` 配置支持每规则回退链；每次路由决策写台账。
+- **失败自动重试 + 回退路由** — 失败先在同 harness 重试（可配，默认 1 次），再沿配置的回退链降级。仅基础设施类失败（探活失败/进程启动失败）触发回退；业务失败只告警不降级。
+- **定时健康探活** — 所有已注册 adapter 每 5 分钟探测一次（可配）；健康↔异常翻转经 `notifyCommand` 推告警（持续故障不重复告警，恢复时通知）。
+- **宿主版本感知 + 升级自检** — 启动记录宿主版本；版本变化时跑冒烟自检（adapter 注册、echo 往返、hooks 确认）并推送报告。
+- **binary 诊断增强** — `harness_list` healthDetail 新增当前 PATH、实际 binary 位置（可找到时）与可能原因（如悬空的 `~/.nvm/current` 符号链接）。
+- **HTTP 任务两级超时** — 替代粗放的总时长杀进程：idle 超时（默认 5 分钟无事件）触发 `GET /session` 核查；running → 重挂 SSE 继续观察；idle → 结算成功；missing → 工作区产出探测（`git status`）标记 `hasOutput`，已完成的产出不会被当垃圾误重派。总时长兜底（默认 2 h）走同一核查流程，绝不盲杀。
+- 新增配置键：`idleTimeoutMs`、`maxDurationMs`、`sessionCheckMaxRetries`、`routing`。
 
 ## v0.4.2 新特性
 
@@ -167,18 +245,34 @@ harness_status { }                                        // 查进度 / 结果
 
 ## 配置（openclaw.json → plugins.entries["harness-bridge"].config）
 
+每个键都可选，均有可用默认值（零配置可跑）。权威的键/默认值/说明清单见
+[docs/config-reference.md](docs/config-reference.md)——即 `harness_doctor` 配置校验所用的同一张表。速查：
+
 | 键 | 默认 | 说明 |
 |----|------|------|
 | `dataDir` | `~/.openclaw/harness-bridge` | 台账 / 任务日志 / 用户 adapter |
 | `adaptersDir` | `<dataDir>/adapters` | 额外 adapter 目录（覆盖内置同名文件） |
 | `paramsFile` | 内置字典 | 模型参数字典（exact/prefix/defaults 三级匹配 + skip_patterns） |
-| `notifyCommand` | 无 | 后台任务完成时执行的 shell 命令（env: `HB_TASK_ID`/`HB_HARNESS`/`HB_STATUS`/`HB_EXIT_CODE`/`HB_SESSION_ID`/`HB_LOG_FILE`） |
+| `notifyCommand` | 无 | 后台任务完成或告警触发时执行的 shell 命令（env: `HB_ALERT` + 各类型 `HB_*` 变量，见「告警通道」） |
 | `defaultTimeoutMs` | 600000 | `harness_run` 默认超时 |
 | `defaultTimeoutByTaskType` | 无 | v0.4.4 — taskType → 默认超时毫秒映射（未显式传 `timeoutMs` 时覆盖内置默认） |
 | `globalWorkspace` | 无 | v0.4.4 — `harness_run` 未传 `cwd` 时的兜底工作空间；未配置则用 serve 进程默认目录 |
 | `successNotifyMinDurationMs` | 300000 | v0.4.4 — 任务时长达到阈值才推成功通知（≤0 禁用） |
 | `statusLineEnabled` | `true` | v0.4 — 每条出站回复追加后台任务状态行 |
 | `taskboardFile` | 无 | v0.4 — markdown 任务台账「进行中」段并入状态行 |
+| `turnPrepareEnabled` | `true` | v0.4.1 — 每回合注入后台任务清单 |
+| `metricsEnabled` | `true` | v0.4.1 — 进程内观测采样器 |
+| `eventRetentionDays` | 30 | v0.4.1 — `task_event` 保留天数（0 = 不清理） |
+| `agentOpsLogEnabled` / `agentOpsLogFile` / `agentOpsLogMaxBytes` / `agentOpsLogKeep` | `true` / `<dataDir>/agent-ops.log` / 10485760 / 7 | v0.4.5/6 — agent-ops 日志 + 轮转 |
+| `dailyReport.enabled` / `dailyReport.hour` | `true` / 21 | v0.4.6 — 台账日报推送 |
+| `healthWatchdog.enabled` / `healthWatchdog.intervalMs` | `true` / 300000 | v0.4.3 — 定时健康探活 |
+| `routing.*` | 重试 1 次（该配置段存在时） | v0.4.3 — 路由规则 / 回退链 / 重试 |
+| `timeouts.idleTimeoutMs` / `maxDurationMs` / `sessionCheckMaxRetries` | 300000 / 7200000 / 3 | v0.4.3 — HTTP 两级超时 |
+| `worktree.enabled` | `false` | v0.4.8 — 允许 `harness_run` `worktree=true` 在隔离 git worktree 中执行任务 |
+| `doctorSchedule.enabled` / `doctorSchedule.hour` | `true` / 8 | v0.4.8 — doctor 定时体检（error 级发现推送 `doctor_report`） |
+| `hostVersionOverride` | 无 | v0.4.8 — 固定 self-check / doctor 上报的宿主版本（跳过自动探测） |
+| `sampler.enabled` / `sampler.archiveDays` | `false`（默认关闭）/ 30 | v0.4.10 — 观测采样器总开关（关 = 完全不启动采样定时器）+ 按天归档保留天数 |
+| `permissionAsk.enabled` / `permissionAsk.timeoutMs` | `true` / 1800000 | v0.4.12 — OpenCode 权限 ask 人工批准通道：runner 循环内探测挂起权限、推 `permission_ask`、超时自动 reject 并推 `permission_timeout` |
 | `wakeAgent.enabled` / `wakeAgent.timeoutMs` | `false`（默认关闭）/ 15000 | v0.4.12 — 任务终态经 `openclaw system event` 注入唤醒编排 agent（见「告警通道」） |
 
 ## 告警通道（Alert channels）
@@ -193,11 +287,22 @@ harness_status { }                                        // 查进度 / 结果
 
 | `HB_ALERT` | 触发场景 | 环境变量 |
 |------------|----------|----------|
-| `task_failed`（默认） | 任务终态失败 / 超时 | `HB_TASK_ID` `HB_HARNESS` `HB_STATUS` `HB_EXIT_CODE` `HB_SESSION_ID` `HB_LOG_FILE` `HB_FAIL_REASON` `HB_SUPPRESSED` `HB_ADVICE` `HB_HAS_OUTPUT` |
+| `task_failed`（默认） | 任务终态失败 / 超时 | `HB_TASK_ID` `HB_HARNESS` `HB_STATUS` `HB_EXIT_CODE` `HB_SESSION_ID` `HB_LOG_FILE` `HB_FAIL_REASON` `HB_SUPPRESSED` `HB_SUPPRESSED_IDS`（v0.4.7） `HB_ADVICE` `HB_HAS_OUTPUT` |
 | `task_stall` | 会话/进程停滞（连续核查无进展；不自动杀） | `HB_TASK_ID` `HB_SESSION_ID` `HB_DETAIL` `HB_TIME` |
 | `task_success` | v0.4.4 — 长任务成功完成（时长 ≥ `successNotifyMinDurationMs`） | `HB_TASK_ID` `HB_HARNESS` `HB_DURATION` `HB_COST_TOKENS`（如有） `HB_TIME` |
 | `health_change` | 探活状态翻转 | `HB_ADAPTER` `HB_STATE` `HB_PREV_STATE` `HB_DETAIL` `HB_TIME` |
 | `selfcheck` | 升级后冒烟自检报告 | `HB_SELFCHECK` `HB_HOST_VERSION` `HB_DETAIL` `HB_TIME` |
+| `daily_report` | v0.4.7 — 台账日报（内置定时器推送） | `HB_NOTIFY`（报告文本） `HB_REPORT_DATE` |
+| `doctor_report` | v0.4.8 — 定时体检发现 error 级检查项（每天最多一次；全绿/仅 warn 只写台账） | `HB_DETAIL`（异常摘要） `HB_TIME` |
+| `permission_ask` | v0.4.12 — OpenCode 任务被权限 ask 挂起（runner 循环内探测；每 requestID 一次，`harness_permission` 人工审批） | `HB_TASK_ID` `HB_SESSION_ID` `HB_REQUEST_ID` `HB_PERMISSION_DETAIL`（工具名 + 参数摘要，800 字符截断） `HB_TIME` |
+| `permission_timeout` | v0.4.12 — 权限挂起超 `permissionAsk.timeoutMs`（默认 30 分钟）；经 reply 端点自动 reject（不节流，每 requestID 一次） | `HB_TASK_ID` `HB_SESSION_ID` `HB_REQUEST_ID` `HB_PERMISSION_DETAIL` `HB_TIME` |
+
+v0.4.7 渲染契约（随包脚本）：每条告警标题带来源标记——`[harness告警·task-failed]` / `[harness告警·stall]` /
+`[harness告警·watchdog]` / `[harness告警·selfcheck]` / `[harness通知·task-success]` / `[harness日报]` / `[harness体检]` /
+`[harness告警·permission-ask]` / `[harness告警·permission-timeout]`（v0.4.12）；未设置变量渲染为显性占位
+（`(no task id)`、`no exit code (startup failure)` 等）而非裸 `?`；task_failed 必带失败原因、日志绝对路径与
+查询提示（`详情: harness_status taskId=xxx`）；被节流抑制的告警列出 taskId：
+`(60s window: N more tasks suppressed: id1, id2, …)`。
 
 v0.4.12 任务完成唤醒 agent：任务到达终态后，在终态通知同一处经 `openclaw system event --text <单行文本> --mode now`
 向编排 agent 注入一条唤醒文本（fire-and-forget，`wakeAgent.timeoutMs` 约束）。成功态跟随
@@ -222,6 +327,7 @@ npm install
 npm run plugin:build     # tsc + 生成 manifest 元数据
 npm run plugin:validate
 npm test
+npm run deploy           # v0.4.7 — build + 全量测试 + rsync 到 ~/.openclaw/extensions/harness-bridge（之后重启网关）
 ```
 
 本地安装到网关：

@@ -2,7 +2,7 @@
 
 Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, …) from your OpenClaw assistant.
 
-> **Status**: v0.4.2 running in production · RFC under community review — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
+> **Status**: v0.4.12 running in production · RFC under community review — [openclaw/openclaw#172583](https://github.com/openclaw/openclaw/issues/172583)
 >
 > Design background and the community discussion draft: [docs/RFC.md](docs/RFC.md) (v0.1) · [docs/RFC-v0.3.md](docs/RFC-v0.3.md) (v0.3: SDK-level management) · [中文文档](README.zh-CN.md)
 
@@ -18,7 +18,7 @@ OpenClaw already ships three layers for integrating external agents (Agent Harne
 From ClawHub:
 
 ```bash
-openclaw plugins install clawhub:openclaw-plugin-harness-bridge
+openclaw plugins install openclaw-plugin-harness-bridge
 ```
 
 Or from a local checkout:
@@ -34,29 +34,64 @@ openclaw gateway restart
 openclaw plugins inspect harness-bridge --runtime
 ```
 
+Minimal `openclaw.json` — `enabled` alone is a complete, working setup (every config key has a default):
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "harness-bridge": {
+        "enabled": true
+      }
+    }
+  }
+}
+```
+
+Optional but recommended: add a `config.notifyCommand` to receive push notifications (without it the plugin runs fully silent — everything still lands in the ledger):
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "harness-bridge": {
+        "enabled": true,
+        "config": {
+          "notifyCommand": "bash <plugin-dir>/scripts/hb_notify.sh"
+        }
+      }
+    }
+  }
+}
+```
+
 ## Quick start
 
-**Out of the box (zero config):**
+**Zero config out of the box:** every config key has a working default (full list: [docs/config-reference.md](docs/config-reference.md)); the data directory `~/.openclaw/harness-bridge` (SQLite ledger + task logs + agent-ops log + metrics persistence) is created automatically; the v0.4 status line is on by default (every outbound reply gets a `后台任务：…` background-tasks line built from the ledger); the periodic health watchdog (5 min), hourly WAL checkpoint, daily ledger report timer and event retention (30 days) are all on by default.
 
-- Every config key has a working default — the plugin runs with no configuration at all (full list: [docs/config-reference.md](docs/config-reference.md))
-- Data directory `~/.openclaw/harness-bridge` is created automatically (SQLite ledger + task logs + agent-ops log + metrics persistence)
-- All six tools are available immediately — run `harness_list` to see every adapter's health, `harness_doctor` for a one-shot health report
-- The v0.4 status line is on by default: every outbound reply gets a `后台任务：…` (background tasks) line built from the ledger
-- Periodic health watchdog (5 min), hourly WAL checkpoint, daily ledger report timer and event retention (30 days) are all on by default
-- Task timeouts resolve per `taskType` (coding 45 min, others 10 min); failed tasks alert via `notifyCommand` — set `notifyCommand` (recommended: the bundled `scripts/hb_notify.sh`) to actually receive pushes
+Three steps to your first delegated task:
 
-**Optional setup (openclaw.json → plugins.entries["harness-bridge"].config):**
+**Step 1 — Verify the adapters are alive.** In a chat, run `harness_list`: every registered harness reports its health (binary / version / config-file presence); `harness_doctor` gives a one-shot full report. Uninstalled community stubs (`claude-code` / `codex`) show as warn-level findings, not errors.
 
-- `taskboardFile` — merge a markdown taskboard's "in progress" section into the status line
-- `notifyCommand` — run a shell command when a background task finishes (webhook / push notification)
-- Adapter credentials — e.g. the OpenCode HTTP transport reads `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` from the gateway environment
+**Step 2 — (Optional) set up `notifyCommand`.** Without it the plugin runs silently — failures still land in the ledger, but nothing is pushed. Recommended: `"notifyCommand": "bash <plugin-dir>/scripts/hb_notify.sh"` (machine-specific values via `HB_NOTIFY_TARGET` / `HB_NOTIFY_CHANNEL` / `HB_NOTIFY_BIN`; see [Alert channels](#alert-channels)). Task timeouts resolve per `taskType` (coding 45 min, others 10 min). Optional extras: `taskboardFile` merges a markdown taskboard's "in progress" section into the status line; adapter credentials (e.g. the OpenCode HTTP transport reads `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` from the gateway environment) stay in the gateway env.
 
-**First delegation:**
+**Step 3 — Delegate your first task.**
 
 ```
 harness_run { "harness": "opencode", "prompt": "..." }   // background + ledger by default
 harness_status { }                                        // poll progress / results
 ```
+
+## Security & Permissions
+
+A transparent summary of everything the plugin executes or reads — written for ClawHub reviewers triaging static-analysis flags (e.g. "suspicious" `spawn` markers) and for anyone auditing an install:
+
+- **Spawning child processes is the core function, not an anomaly.** Task delegation works by launching the harness binaries you configured (`opencode`, `dsh`, or any declarative adapter's `delegate.run` argv). It also spawns: `git` (worktree creation for `worktree=true` tasks, `git status` workspace-output probes), the `openclaw` CLI (v0.4.12 agent wake-up via `openclaw system event`, off by default), and your own `notifyCommand` shell command. No other execution path exists — spawned commands are built from local config you control, never assembled from remote input.
+- **Credentials come from environment variables** (e.g. the OpenCode HTTP transport reads `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` from the gateway environment for basic auth against your own `opencode serve`). The plugin never hardcodes, logs or persists secrets.
+- **All outbound notifications flow through your own `notifyCommand` script.** The plugin never calls third-party services itself: alert payloads are handed to your script via `HB_*` environment variables, and where they get sent is entirely your configuration. Outbound network is limited to the harness endpoints you declared in adapter/config files (e.g. your local `opencode serve`).
+- **Data stays local.** The SQLite ledger, task logs, metrics archive and ops log live under the plugin data directory (`~/.openclaw/harness-bridge` by default); event payloads are truncated per field (2 KB) and pruned after 30 days by default.
+
+If your scanner flags `spawn` / `exec` usage: it corresponds exactly to the functionality above — an orchestration plugin cannot direct external coding agents without launching their processes.
 
 ## Tools
 
@@ -66,8 +101,28 @@ harness_status { }                                        // poll progress / res
 | `harness_doctor` | v0.4.7 one-shot health report (v0.4.8 adds a worktree-residue check): adapter probes / host & binary versions / binary diagnostics (PATH, dangling symlinks) / ledger health (SQLite integrity, WAL size, task stats) / worktree residue / config audit (current value vs default for every key); ✅/⚠️/❌ graded with fix hints |
 | `harness_sync_models` | Calibrate each harness's model config against a shared parameter dictionary (report / field-level merge write-back / default-model switch) |
 | `harness_run` | Delegate a task (background + ledger by default; `wait=true` for synchronous runs; v0.4.8 `worktree=true` runs in an isolated git worktree on branch `hb-wt/<taskId>`) |
-| `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail); v0.4.7 summary mode on by default (one line per task: taskId / harness / status / duration / cost), `summary=false` for the raw JSON; v0.4.8 includes a worktree hint for worktree-isolated tasks |
+| `harness_status` | Query the task ledger (status / exit code / session id / duration / output tail); v0.4.7 summary mode on by default (one line per task: taskId / harness / status / duration / cost), `summary=false` for the raw JSON; v0.4.8 includes a worktree hint for worktree-isolated tasks; v0.4.11 `events` queries return the latest 50 events by default (`limit` up to 1000, plus `total`/`truncated`) |
 | `harness_mount` | Mount a shared knowledge directory into a harness (`external_directory` allow + `instructions` injection; dry-run/apply, idempotent) |
+| `harness_permission` | v0.4.12 — OpenCode permission-ask human-approval channel: `action=list` shows pending permission requests (requestID / sessionID / permission / args digest, mapped to taskIds where possible); `action=reply` approves (`once` / `always`) or rejects. Pairs with the `permission_ask` alert; requests pending beyond `permissionAsk.timeoutMs` (default 30 min) are auto-rejected |
+
+## What's new in v0.4.12
+
+- **OpenCode permission-ask human-approval channel** — http tasks blocked on a permission ask no longer hang silently: the runner probes pending permissions (`GET /permission`) during its loop and pushes `HB_ALERT=permission_ask` (once per requestID; `HB_PERMISSION_DETAIL` carries the tool name + args digest). The new `harness_permission` tool lists pending requests (`action=list`, mapped to taskIds where possible) and approves (`reply=once` / `always`) or rejects (`reply=reject`) them. A guard daemon auto-rejects requests pending beyond `permissionAsk.timeoutMs` (default 30 min) with a one-shot `permission_timeout` alert. Config: `permissionAsk.enabled` (default on) / `permissionAsk.timeoutMs`.
+- **Agent wake-up on task terminal states** — when a task reaches a terminal state, the plugin injects a one-line wake text into the orchestrating agent via `openclaw system event --mode now`, so it auto-collects the result and wraps up without waiting for the next user turn. **Default off** (`wakeAgent.enabled` — same-session writer races still need to be ironed out; set `true` to opt in). `wakeAgent.sessionKey` targets a user-visible session (e.g. your WeChat direct chat) so the wrap-up report is actually seen; for `direct:` keys the wake text's "send a confirmation first" instruction automatically carries the explicit message target extracted from the key. Success wakes require the `successNotifyMinDurationMs` threshold; failed/timeout wakes follow the 60s notify throttle; each task+status wakes at most once; any `openclaw` CLI problem only logs a one-line warning (fail-open).
+
+## What's new in v0.4.11
+
+- **Timer-leak fix** — plugin (re)registration funnels all 7 timer classes (health watchdog / doctor schedule / daily report / WAL checkpoint / lost sweep / metrics save / event retention) through a re-entry-safe register, so gateway reloads can no longer stack duplicate timers; watchdog state and daily-report sent-dates are persisted (atomic write, fail-open) and restored on startup.
+- **Event-query throttling** — `harness_status events=<taskId>` returns only the latest 50 events by default (`limit` to adjust, cap 1000) plus `total`/`truncated`, so a long task's event timeline can no longer blow up the model context.
+- **Ledger & alert noise reduction** — `health_change` events are written only on actual state transitions or the hourly snapshot (288 → 24 rows/day); uninstalled community stubs (`claude-code` / `codex`) degrade to warn-level findings and no longer trigger alert pushes.
+
+## What's new in v0.4.10
+
+- **Metrics sampler rework** — the sampler now starts **only when `sampler.enabled=true`** (default off — no sampling timers at all unless you opt in). When enabled it samples as before (memory / event-loop p99 into the 24h ring buffer, hourly `metrics.json` persistence) and additionally archives a daily snapshot to `<dataDir>/metrics-archive/metrics-YYYYMMDD.json` (atomic, idempotent, timezone-correct, fail-open); archives older than `sampler.archiveDays` (default 30) are pruned automatically.
+
+## What's new in v0.4.9
+
+- Version-alignment release only (manifest/package version sync) — no user-facing changes.
 
 ## What's new in v0.4.8
 
@@ -95,7 +150,7 @@ harness_status { }                                        // poll progress / res
 
 ## What's new in v0.4.5
 
-- **agent-ops logging hook** — `before_tool_call` / `after_tool_call` hooks now log agent-layer tool calls (exec / edit / write / apply_patch / harness_run, etc.) to a unified ops log (default `/root/jarvisLogs/jarvis-tools.log`) in jlog format (`[agent-ops] [tool] summary + duration`). exec logs a truncated one-line command, file tools log the path, harness_run logs harness + taskId + status + duration. Read-only tools (read / ls / grep / glob / memory_search) are skipped to control noise. Fully fail-open: logging failures never block tool calls. Configurable via `agentOpsLogEnabled` (default on) and `agentOpsLogFile`.
+- **agent-ops logging hook** — `before_tool_call` / `after_tool_call` hooks now log agent-layer tool calls (exec / edit / write / apply_patch / harness_run, etc.) to a unified ops log (default `<dataDir>/agent-ops.log`, configurable via `agentOpsLogFile`) in jlog format (`[agent-ops] [tool] summary + duration`). exec logs a truncated one-line command, file tools log the path, harness_run logs harness + taskId + status + duration. Read-only tools (read / ls / grep / glob / memory_search) are skipped to control noise. Fully fail-open: logging failures never block tool calls. Configurable via `agentOpsLogEnabled` (default on) and `agentOpsLogFile`.
 - **dsh adapter sdk config fix** — the built-in dsh adapter shipped `sdk.provider = deepseek-official` while `modelSync` injects a `tokenhub` provider; the mismatch was masked by `DSH_PROVIDER` / `DSH_MODEL` env vars and surfaced as `initialize` failures (`paths[0] undefined`) once the gateway restarted without them. The sdk config now matches the modelSync provider (`tokenhub` / `glm-5.3-flash`).
 
 ## What's new in v0.4.4
@@ -213,6 +268,8 @@ the same table `harness_doctor` audits against. Quick reference:
 | `worktree.enabled` | `false` | v0.4.8 — allow `harness_run` `worktree=true` to run tasks in an isolated git worktree |
 | `doctorSchedule.enabled` / `doctorSchedule.hour` | `true` / 8 | v0.4.8 — scheduled doctor run (error-level findings push `doctor_report`) |
 | `hostVersionOverride` | none | v0.4.8 — pin the host version reported by self-check / doctor (skips auto-detect) |
+| `sampler.enabled` / `sampler.archiveDays` | `false` (default off) / 30 | v0.4.10 — metrics sampler master switch (off = no sampling timers at all) + daily archive retention days |
+| `permissionAsk.enabled` / `permissionAsk.timeoutMs` | `true` / 1800000 | v0.4.12 — OpenCode permission-ask human-approval channel: probe pending asks during the runner loop, push `permission_ask`, auto-reject after the timeout with `permission_timeout` |
 | `wakeAgent.enabled` / `wakeAgent.timeoutMs` | `false` (default off) / 15000 | v0.4.12 — task terminal states wake the orchestrating agent via `openclaw system event` injection (see "Alert channels") |
 
 ## Alert channels
