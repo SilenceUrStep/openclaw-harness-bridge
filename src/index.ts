@@ -320,6 +320,12 @@ const configSchema = Type.Object({
           description: "v0.4.12 openclaw 注入超时毫秒，默认 15000；CLI 不可用时仅告警跳过（fail-open）",
         }),
       ),
+      sessionKey: Type.Optional(
+        Type.String({
+          description:
+            "v0.4.12 注入目标会话 key（如 agent:main:openclaw-weixin:direct:xxx），缺省=agent main session；定向唤醒用户可见会话时配置",
+        }),
+      ),
     }),
   ),
 });
@@ -637,8 +643,12 @@ const toolEntry = defineToolPlugin({
             ledger,
             tasksDir,
             notifyCommand: cfg.notifyCommand,
-            // v0.4.12 任务终态唤醒 agent：默认开启落在接线层（原语层 cfg 缺省时不注入，测试安全）
-            wakeAgent: { enabled: cfg.wakeAgent?.enabled ?? true, timeoutMs: cfg.wakeAgent?.timeoutMs },
+            // v0.4.12 任务终态唤醒 agent：默认开启落在接线层（原语层 cfg 缺省时不注入，测试安全）；sessionKey 定向唤醒用户可见会话
+            wakeAgent: {
+              enabled: cfg.wakeAgent?.enabled ?? true,
+              timeoutMs: cfg.wakeAgent?.timeoutMs,
+              sessionKey: cfg.wakeAgent?.sessionKey,
+            },
             // v0.4.8 worktree 隔离：仅首次派发沿用计划好的 taskId（与 worktree 目录/分支名一致）；重试/降级任务自生成 ID
             ...(worktreePlan.action === "create" && meta.isInitial ? { taskId: worktreePlan.taskId } : {}),
             ...(onFinalRef ? { onFinal: onFinalRef } : {}),

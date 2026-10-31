@@ -87,6 +87,40 @@ describe("wake-agent v0.4.12", () => {
       expect(child.unref).toHaveBeenCalled();
     });
 
+    it("sessionKey 非空：命令追加 --session-key 且经 HB_WAKE_SESSION 传值", () => {
+      const child = childStub();
+      spawnMock.mockReturnValue(child);
+      wakeAgent(rec({ id: "hb_sk", harness: "dsh", status: "success", exitCode: 0 }), {
+        enabled: true,
+        sessionKey: "agent:main:openclaw-weixin:direct:wx_user1",
+      });
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+      const [bin, argv, opts] = spawnMock.mock.calls[0];
+      expect(bin).toBe("bash");
+      expect(String(argv[1])).toContain('--session-key "$HB_WAKE_SESSION"');
+      expect(opts.env.HB_WAKE_SESSION).toBe("agent:main:openclaw-weixin:direct:wx_user1");
+      expect(opts.env.HB_WAKE_TEXT).toContain("任务 hb_sk（dsh）状态 success");
+      expect(child.unref).toHaveBeenCalled();
+    });
+
+    it("sessionKey 缺省/空白：命令不含 --session-key 且不设 HB_WAKE_SESSION（向后兼容）", () => {
+      spawnMock.mockReturnValue(childStub());
+      wakeAgent(rec({ id: "hb_default" }), { enabled: true });
+      expect(String(spawnMock.mock.calls[0][1][1])).not.toContain("session-key");
+      expect(spawnMock.mock.calls[0][2].env.HB_WAKE_SESSION).toBeUndefined();
+      spawnMock.mockClear();
+      spawnMock.mockReturnValue(childStub());
+      wakeAgent(rec({ id: "hb_blank" }), { enabled: true, sessionKey: "   " });
+      expect(String(spawnMock.mock.calls[0][1][1])).not.toContain("session-key");
+      expect(spawnMock.mock.calls[0][2].env.HB_WAKE_SESSION).toBeUndefined();
+    });
+
+    it("sessionKey 首尾空白：trim 后经 HB_WAKE_SESSION 传值", () => {
+      spawnMock.mockReturnValue(childStub());
+      wakeAgent(rec({ id: "hb_trim" }), { enabled: true, sessionKey: "  agent:main:weixin  " });
+      expect(spawnMock.mock.calls[0][2].env.HB_WAKE_SESSION).toBe("agent:main:weixin");
+    });
+
     it("防重：同任务同终态只注入一次，不同终态各自注入", () => {
       spawnMock.mockReturnValue(childStub());
       const cfg = { enabled: true };

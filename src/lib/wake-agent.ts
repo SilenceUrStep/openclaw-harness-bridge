@@ -10,6 +10,8 @@ export interface WakeAgentOptions {
   enabled?: boolean;
   /** openclaw 注入的探测/执行超时（毫秒，默认 15000） */
   timeoutMs?: number;
+  /** v0.4.12 注入目标会话 key（如 agent:main:openclaw-weixin:direct:xxx）；缺省不传 = openclaw 默认 main session，保持向后兼容 */
+  sessionKey?: string;
 }
 
 /** v0.4.12 默认注入超时：与既有通知通道 timeout 保持一致 */
@@ -44,7 +46,8 @@ export function buildWakeText(rec: Pick<TaskRecord, "id" | "harness" | "status" 
 }
 
 /**
- * v0.4.12 任务终态后通过 `openclaw system event --text <单行文本> --mode now` 唤醒编排 agent。
+ * v0.4.12 任务终态后通过 `openclaw system event --text <单行文本> --mode now` 唤醒编排 agent；
+ * 配置 sessionKey 时追加 `--session-key` 定向注入用户可见会话，缺省走 openclaw 默认 main session。
  * fire-and-forget：spawn 后不等待结果；任何异常只打一行 warning（fail-open，不影响任务收尾）。
  * 未传 cfg 或 enabled===false 时直接返回 —— 原语层默认关闭，由 index.ts 接线层兜底开启。
  */
@@ -62,9 +65,13 @@ export function wakeAgent(rec: TaskRecord, cfg?: WakeAgentOptions): void {
       console.warn(`[harness-bridge] wakeAgent: openclaw CLI 不可用，跳过唤醒（taskId=${rec.id}）`);
       return;
     }
-    // 文本经 HB_WAKE_TEXT 环境变量传入，规避引号/注入问题；session-key 不传（走默认编排会话）
-    const child = spawn("bash", ["-c", 'exec openclaw system event --text "$HB_WAKE_TEXT" --mode now'], {
-      env: { ...process.env, HB_WAKE_TEXT: text },
+    // 文本经 HB_WAKE_TEXT 环境变量传入，规避引号/注入问题；v0.4.12 sessionKey 非空时经 HB_WAKE_SESSION 追加 --session-key 定向唤醒用户可见会话，缺省保持原命令（走默认 main session）
+    const sessionKey = cfg.sessionKey?.trim();
+    const command = sessionKey
+      ? 'exec openclaw system event --text "$HB_WAKE_TEXT" --mode now --session-key "$HB_WAKE_SESSION"'
+      : 'exec openclaw system event --text "$HB_WAKE_TEXT" --mode now';
+    const child = spawn("bash", ["-c", command], {
+      env: { ...process.env, HB_WAKE_TEXT: text, ...(sessionKey ? { HB_WAKE_SESSION: sessionKey } : {}) },
       stdio: "ignore",
       detached: true,
     });
