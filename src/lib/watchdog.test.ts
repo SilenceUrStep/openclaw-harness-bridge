@@ -138,3 +138,73 @@ describe("HealthWatchdog（v0.4.3 定时探活）", () => {
     expect(wd.running).toBe(false);
   });
 });
+
+describe("HealthWatchdog 台账降噪（v0.4.11：health 快照限流）", () => {
+  it("无变化且未到快照间隔：跳过写全量 health 快照（首轮基线外不再逐轮刷屏）", async () => {
+    const { wd, ledger } = newWatchdog([[status("a", true)], [status("a", true)], [status("a", true)]]);
+    await wd.probeOnce();
+    await wd.probeOnce();
+    await wd.probeOnce();
+    const events = ledger.getEvents(WATCHDOG_TASK_ID);
+    // 仅首轮基线 1 条快照；无 health_change
+    expect(events.filter((e) => e.type === "health")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "health_change")).toHaveLength(0);
+  });
+
+  it("首轮必写快照建立基线（lastSnapshotTs 初始 null）", async () => {
+    const { wd, ledger } = newWatchdog([[status("a", true)]]);
+    await wd.probeOnce();
+    const events = ledger.getEvents(WATCHDOG_TASK_ID).filter((e) => e.type === "health");
+    expect(events).toHaveLength(1);
+    expect(
+      (events[0].payload as { results: Array<{ id: string }> }).results.map((r) => r.id),
+    ).toEqual(["a"]);
+  });
+
+  it("状态变化轮：health_change 照常写，且同步补写全量快照（对照变化前后）并刷新基线", async () => {
+    const { wd, ledger } = newWatchdog(
+      [[status("a", true)], [status("a", false, "binary 不可用")], [status("a", false)]],
+      "echo alerted",
+    );
+    await wd.probeOnce(); // 首轮基线
+    await wd.probeOnce(); // 变化轮：health + health_change
+    await wd.probeOnce(); // 无变化且基线刚刷新：不写
+    const events = ledger.getEvents(WATCHDOG_TASK_ID);
+    expect(events.filter((e) => e.type === "health")).toHaveLength(2);
+    expect(events.filter((e) => e.type === "health_change")).toHaveLength(1);
+    expect(spawnMock).toHaveBeenCalledTimes(1); // 告警逻辑不变
+  });
+
+  it("距上次快照 ≥ 1 小时无变化：补写全量快照（SNAPSHOT_INTERVAL_MS 到期）", async () => {
+    vi.useFakeTimers();
+    try {
+      const { wd, ledger } = newWatchdog([[status("a", true)], [status("a", true)]]);
+      await wd.probeOnce(); // 首轮基线
+      expect(ledger.getEvents(WATCHDOG_TASK_ID).filter((e) => e.type === "health")).toHaveLength(1);
+      // 时间前推 2 小时：无变化但超过快照间隔 → 补写
+      vi.setSystemTime(Date.now() + 2 * 3_600_000);
+      const round = await wd.probeOnce();
+      expect(round.changes).toEqual([]);
+      const health = ledger.getEvents(WATCHDOG_TASK_ID).filter((e) => e.type === "health");
+      expect(health).toHaveLength(2);
+      expect(ledger.getEvents(WATCHDOG_TASK_ID).filter((e) => e.type === "health_change")).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("变化轮同时到快照间隔：只写一条全量快照（与 health_change 同批）", async () => {
+    vi.useFakeTimers();
+    try {
+      const { wd, ledger } = newWatchdog([[status("a", true)], [status("a", false)]], "echo alerted");
+      await wd.probeOnce();
+      vi.setSystemTime(Date.now() + 2 * 3_600_000);
+      await wd.probeOnce();
+      const events = ledger.getEvents(WATCHDOG_TASK_ID);
+      expect(events.filter((e) => e.type === "health")).toHaveLength(2);
+      expect(events.filter((e) => e.type === "health_change")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

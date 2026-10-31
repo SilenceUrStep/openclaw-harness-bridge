@@ -116,6 +116,34 @@ describe("Ledger (SQLite)", () => {
     expect(JSON.stringify(events[1].payload).length).toBeLessThanOrEqual(2048);
   });
 
+  it("v0.4.11 getEvents limit：不传全量兼容；传 limit 只回最新 N 条且按 seq 正序；countEvents 总数", async () => {
+    const l = tmpLedger();
+    const id = "ev-limit";
+    l.append(rec({ id, harness: "opencode", status: "running" }));
+    for (let i = 0; i < 10; i++) {
+      l.addEvents(id, [{ type: "step", payload: { i }, ts: new Date().toISOString() }]);
+    }
+    // 不传 limit：全量（既有调用兼容）
+    expect(l.getEvents(id)).toHaveLength(10);
+    expect(l.getEvents(id).map((e) => (e.payload as { i: number }).i)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    // limit=3：取最新 3 条（seq 7/8/9），仍按 seq 正序返回保持时间线可读
+    const last3 = l.getEvents(id, 3);
+    expect(last3.map((e) => e.seq)).toEqual([7, 8, 9]);
+    expect(last3.map((e) => (e.payload as { i: number }).i)).toEqual([7, 8, 9]);
+    // limit 超过总数：等价全量
+    expect(l.getEvents(id, 100)).toHaveLength(10);
+    // limit=0：空集（调用方限流语义由工具层 clamp，存储层如实执行）
+    expect(l.getEvents(id, 0)).toEqual([]);
+    // countEvents：total 与 truncated 判断依据
+    expect(l.countEvents(id)).toBe(10);
+    expect(l.countEvents("no-such-task")).toBe(0);
+    // 截断组合：total(10) > 返回条数(3) → truncated 语义成立
+    const total = l.countEvents(id);
+    const returned = l.getEvents(id, 3);
+    expect(total > returned.length).toBe(true);
+    await l.close();
+  });
+
   it("truncate2kb 行为", () => {
     expect(truncate2kb("abc")).toBe("abc");
     const long = "y".repeat(3000);

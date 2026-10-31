@@ -589,11 +589,36 @@ export class Ledger {
     }
   }
 
-  getEvents(taskId: string): LedgerEvent[] {
+  /**
+   * 事件查询：按 seq 正序返回该任务全部事件。
+   * v0.4.11 可选 limit 限流：只取最新 N 条（子查询倒序取 N 后再正序回排，保持时间线可读），
+   * 防止大任务全量事件（如 watchdog 7000+ 条）撑爆调用方上下文；不传 limit 保持全量（既有调用兼容）。
+   */
+  getEvents(taskId: string, limit?: number): LedgerEvent[] {
     const db = this.ready();
-    const rows = db
-      .prepare("SELECT task_id, seq, type, payload, ts FROM task_event WHERE task_id = ? ORDER BY seq")
-      .all(taskId) as Array<{ task_id: string; seq: number; type: string; payload: string; ts: string }>;
+    const cols = "task_id, seq, type, payload, ts";
+    const rows =
+      limit !== undefined && Number.isFinite(limit)
+        ? (db
+            .prepare(
+              `SELECT ${cols} FROM (SELECT ${cols} FROM task_event WHERE task_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC`,
+            )
+            .all(taskId, Math.max(0, Math.floor(limit))) as Array<{
+            task_id: string;
+            seq: number;
+            type: string;
+            payload: string;
+            ts: string;
+          }>)
+        : (db
+            .prepare(`SELECT ${cols} FROM task_event WHERE task_id = ? ORDER BY seq`)
+            .all(taskId) as Array<{
+            task_id: string;
+            seq: number;
+            type: string;
+            payload: string;
+            ts: string;
+          }>);
     return rows.map((r) => {
       let payload: unknown = r.payload;
       try {
@@ -603,6 +628,15 @@ export class Ledger {
       }
       return { taskId: r.task_id, seq: r.seq, type: r.type, payload, ts: r.ts };
     });
+  }
+
+  /** v0.4.11 事件总数查询（harness_status events 查询的 total/truncated 依据） */
+  countEvents(taskId: string): number {
+    const db = this.ready();
+    const r = db
+      .prepare("SELECT COUNT(*) AS n FROM task_event WHERE task_id = ?")
+      .get(taskId) as { n: number | bigint } | undefined;
+    return Number(r?.n ?? 0);
   }
 
   /**

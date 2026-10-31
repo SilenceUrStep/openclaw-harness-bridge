@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { BridgeConfig } from "./adapters.js";
 import { probeAllAdapters, type AdapterStatus } from "./health.js";
-import type { Ledger } from "./ledger.js";
+import type { Ledger, LedgerEventType } from "./ledger.js";
 
 /**
  * v0.4.3 定时探活 + 状态变化告警：
@@ -12,6 +12,9 @@ import type { Ledger } from "./ledger.js";
  */
 
 export const WATCHDOG_TASK_ID = "hb_watchdog";
+
+/** v0.4.11 台账降噪：全量 health 快照最小写入间隔（1 小时；5 分钟一轮由 288 条/天降到约 24 条/天） */
+export const SNAPSHOT_INTERVAL_MS = 3_600_000;
 
 export interface HealthChange {
   adapter: string;
@@ -39,6 +42,8 @@ export class HealthWatchdog {
   private timer: NodeJS.Timeout | null = null;
   private states = new Map<string, boolean>();
   private probing = false;
+  /** v0.4.11 台账降噪：上次写全量 health 快照的时间（null = 首轮必写快照建立基线） */
+  private lastSnapshotTs: number | null = null;
 
   constructor(private readonly opts: WatchdogOptions) {}
 
@@ -78,21 +83,32 @@ export class HealthWatchdog {
         }
         this.states.set(r.id, r.healthy);
       }
-      try {
-        this.opts.ledger.addEvents(WATCHDOG_TASK_ID, [
-          {
-            type: "health",
-            payload: {
-              round: ts,
-              results: results.map((r) => ({ id: r.id, healthy: r.healthy, detail: r.healthDetail })),
-            },
-            ts,
+      // v0.4.11 台账降噪：仅「本轮存在状态变化」或「距上次写快照 ≥ SNAPSHOT_INTERVAL_MS」才写
+      // 全量 health 快照（首轮 lastSnapshotTs=null 必写建立基线）；health_change 事件照常写，
+      // 探活与告警逻辑完全不变。变化轮的全量快照一并写入，便于对照变化前后状态。
+      const snapshotDue =
+        this.lastSnapshotTs === null ||
+        changes.length > 0 ||
+        Date.now() - this.lastSnapshotTs >= SNAPSHOT_INTERVAL_MS;
+      const events: Array<{ type: LedgerEventType | string; payload: unknown; ts: string }> = changes.map(
+        (c) => ({ type: "health_change", payload: c, ts: c.ts }),
+      );
+      if (snapshotDue) {
+        events.push({
+          type: "health",
+          payload: {
+            round: ts,
+            results: results.map((r) => ({ id: r.id, healthy: r.healthy, detail: r.healthDetail })),
           },
-          ...changes.map((c) => ({ type: "health_change", payload: c, ts: c.ts })),
-        ]);
+          ts,
+        });
+      }
+      try {
+        if (events.length > 0) this.opts.ledger.addEvents(WATCHDOG_TASK_ID, events);
       } catch {
         // 台账写入失败不影响告警
       }
+      if (snapshotDue) this.lastSnapshotTs = Date.now();
       for (const c of changes) this.sendAlert(c);
       return { results, changes };
     } finally {

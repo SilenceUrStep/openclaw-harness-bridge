@@ -303,6 +303,14 @@ function openLedger(cfg: BridgeConfig): Ledger {
   });
 }
 
+/**
+ * v0.4.11 harness_status events 查询限流参数解析：
+ * 默认 50、上限 1000、非法值（非有限数字 / <1）回落默认。导出仅供单测复用。
+ */
+export function resolveEventLimit(raw: unknown): number {
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 1 ? Math.min(Math.floor(raw), 1000) : 50;
+}
+
 /** harness_run 返回体（cli/http 共用，字段与 v0.1 完全兼容，http 额外追加成本/归因字段） */
 function runResponse(rec: TaskRecord, wait: boolean): Record<string, unknown> {
   if (wait) {
@@ -783,14 +791,19 @@ const toolEntry = defineToolPlugin({
       name: "harness_status",
       label: "Harness Status",
       description:
-        "查询委派任务台账（SQLite）：状态/退出码/会话 ID/耗时/输出尾部/成本与 token 聚合/失败归因（fail_reason）。running 任务若进程已消失且无退出记录，自动标记 lost。新增：events=taskId 输出单任务事件时间线；since/until 时间窗过滤；legacy=true 只读查看 v0.1 JSON Lines 旧台账；metrics=true 输出进程内存/事件循环延迟观测摘要（v0.4.1）；v0.4.7 摘要模式（默认开）：一行一任务（taskId/harness/状态/耗时/成本），summary=false 保留原始 JSON 输出。",
+        "查询委派任务台账（SQLite）：状态/退出码/会话 ID/耗时/输出尾部/成本与 token 聚合/失败归因（fail_reason）。running 任务若进程已消失且无退出记录，自动标记 lost。新增：events=taskId 输出单任务事件时间线（v0.4.11 默认只回最新 50 条，传 limit 调整，上限 1000；返回体含 total 事件总数与 truncated 是否截断）；since/until 时间窗过滤；legacy=true 只读查看 v0.1 JSON Lines 旧台账；metrics=true 输出进程内存/事件循环延迟观测摘要（v0.4.1）；v0.4.7 摘要模式（默认开）：一行一任务（taskId/harness/状态/耗时/成本），summary=false 保留原始 JSON 输出。",
       parameters: Type.Object({
         taskId: Type.Optional(Type.String({ description: "精确查询单个任务" })),
         harness: Type.Optional(Type.String({ description: "按 harness 过滤" })),
         status: Type.Optional(
           Type.String({ description: "按状态过滤: running/success/failed/timeout/lost" }),
         ),
-        limit: Type.Optional(Type.Number({ description: "返回条数上限，默认 20" })),
+        limit: Type.Optional(
+          Type.Number({
+            description:
+              "任务列表返回条数上限（默认 20）；events 查询时为事件条数上限（v0.4.11 默认 50、上限 1000，非法值回落默认）",
+          }),
+        ),
         summary: Type.Optional(
           Type.Boolean({
             description:
@@ -798,7 +811,9 @@ const toolEntry = defineToolPlugin({
           }),
         ),
         events: Type.Optional(
-          Type.String({ description: "输出指定任务的事件时间线（值 = taskId）" }),
+          Type.String({
+            description: "输出指定任务的事件时间线（值 = taskId）；v0.4.11 默认只回最新 50 条，传 limit 调整（上限 1000）",
+          }),
         ),
         since: Type.Optional(Type.String({ description: "时间窗起点（ISO 时间，含边界）" })),
         until: Type.Optional(Type.String({ description: "时间窗终点（ISO 时间，含边界）" })),
@@ -829,8 +844,11 @@ const toolEntry = defineToolPlugin({
         const limit = params.limit ?? 20;
         if (params.events) {
           const task = ledger.getById(params.events) ?? null;
-          const events: LedgerEvent[] = ledger.getEvents(params.events);
-          return { task, events, total: events.length };
+          // v0.4.11 事件查询限流：默认只回最新 50 条（上限 1000，非法值回落默认），防止大任务
+          // 全量事件（如 hb_watchdog 7000+ 条）撑爆调用方上下文；total=事件总数、truncated=是否截断
+          const total = ledger.countEvents(params.events);
+          const events: LedgerEvent[] = ledger.getEvents(params.events, resolveEventLimit(params.limit));
+          return { task, events, total, truncated: total > events.length };
         }
         const filter = {
           taskId: params.taskId,
