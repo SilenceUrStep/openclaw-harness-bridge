@@ -3,7 +3,7 @@ import type { TaskRecord } from "./ledger.js";
 
 /**
  * v0.4.12 任务完成唤醒 agent（openclaw system event 注入）配置。
- * 终态通知送达后追加一条单行唤醒文本，提示编排 agent 用 harness_status 查收并收口。
+ * 终态通知送达后追加一条单行唤醒文本，提示编排 agent 先用 message 工具向用户发确认、再用 harness_status 查收并收口。
  */
 export interface WakeAgentOptions {
   /** 是否启用（默认 true；接线层对未配置项兜底为开启） */
@@ -37,7 +37,7 @@ function sanitizeFailReason(reason: string): string {
 /** v0.4.12 构造单行唤醒文本（成功/失败共用模板，失败态追加失败原因） */
 export function buildWakeText(rec: Pick<TaskRecord, "id" | "harness" | "status" | "exitCode" | "failReason" | "error">): string {
   const exit = typeof rec.exitCode === "number" ? String(rec.exitCode) : "无";
-  let text = `[harness-bridge] 任务 ${rec.id}（${rec.harness}）状态 ${rec.status}，退出码 ${exit}，请用 harness_status 查收并执行后续动作（收口/汇报）。`;
+  let text = `[harness-bridge] 任务 ${rec.id}（${rec.harness}）状态 ${rec.status}，退出码 ${exit}。收到后请立即用 message 工具向用户发送一条简短确认（如「已自动唤醒，正在收口」），再用 harness_status 查收并执行后续动作（收口/汇报）。`;
   const reason = rec.failReason ?? rec.error;
   if (rec.status !== "success" && reason) {
     text += ` 失败原因: ${sanitizeFailReason(reason)}`;

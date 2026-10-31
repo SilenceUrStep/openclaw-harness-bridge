@@ -27,10 +27,13 @@ const { buildWakeText, wakeAgent, resetWakeAgentState } = await import("./wake-a
 
 describe("wake-agent v0.4.12", () => {
   describe("buildWakeText 唤醒文本", () => {
-    it("success：单行模板含任务号/harness/状态/退出码", () => {
-      expect(buildWakeText(rec({ id: "hb_x", harness: "dsh", status: "success", exitCode: 0 }))).toBe(
-        "[harness-bridge] 任务 hb_x（dsh）状态 success，退出码 0，请用 harness_status 查收并执行后续动作（收口/汇报）。",
+    it("success：单行模板含任务号/harness/状态/退出码，且确认指示在最前", () => {
+      const text = buildWakeText(rec({ id: "hb_x", harness: "dsh", status: "success", exitCode: 0 }));
+      expect(text).toBe(
+        "[harness-bridge] 任务 hb_x（dsh）状态 success，退出码 0。收到后请立即用 message 工具向用户发送一条简短确认（如「已自动唤醒，正在收口」），再用 harness_status 查收并执行后续动作（收口/汇报）。",
       );
+      expect(text).toContain("立即用 message 工具");
+      expect(text.indexOf("立即用 message 工具")).toBeLessThan(text.indexOf("harness_status"));
     });
 
     it("退出码缺失渲染为「无」", () => {
