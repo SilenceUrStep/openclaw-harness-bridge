@@ -34,10 +34,32 @@ function sanitizeFailReason(reason: string): string {
   return oneLine.length > FAIL_REASON_MAX_CHARS ? `${oneLine.slice(0, FAIL_REASON_MAX_CHARS)}…` : oneLine;
 }
 
-/** v0.4.12 构造单行唤醒文本（成功/失败共用模板，失败态追加失败原因） */
-export function buildWakeText(rec: Pick<TaskRecord, "id" | "harness" | "status" | "exitCode" | "failReason" | "error">): string {
+/**
+ * v0.4.12 从 sessionKey 提取确认消息投递 target：direct 会话取最后一段
+ * （agent:main:openclaw-weixin:direct:<id> → <id>）；无 direct: 段返回 undefined。
+ */
+export function extractTargetFromSessionKey(sessionKey?: string): string | undefined {
+  const key = sessionKey?.trim();
+  if (!key) return undefined;
+  const idx = key.lastIndexOf("direct:");
+  if (idx === -1) return undefined;
+  const target = key.slice(idx + "direct:".length).trim();
+  return target || undefined;
+}
+
+/**
+ * v0.4.12 构造单行唤醒文本（成功/失败共用模板，失败态追加失败原因）。
+ * ackTarget 有值时确认指示带显式 message 参数（accountId 与 tools/hb_notify.sh 的 HB_NOTIFY_TARGET 同源）。
+ */
+export function buildWakeText(
+  rec: Pick<TaskRecord, "id" | "harness" | "status" | "exitCode" | "failReason" | "error">,
+  ackTarget?: string,
+): string {
   const exit = typeof rec.exitCode === "number" ? String(rec.exitCode) : "无";
-  let text = `[harness-bridge] 任务 ${rec.id}（${rec.harness}）状态 ${rec.status}，退出码 ${exit}。收到后请立即用 message 工具向用户发送一条简短确认（如「已自动唤醒，正在收口」），再用 harness_status 查收并执行后续动作（收口/汇报）。`;
+  const ack = ackTarget
+    ? `收到后请立即用 message 工具向用户发送一条简短确认（action=send，target=${ackTarget}，channel=openclaw-weixin，accountId=90e2cc4ed712-im-bot），消息内容如「✅ 已自动唤醒，正在收口」`
+    : "收到后请立即用 message 工具向用户发送一条简短确认（如「已自动唤醒，正在收口」）";
+  let text = `[harness-bridge] 任务 ${rec.id}（${rec.harness}）状态 ${rec.status}，退出码 ${exit}。${ack}，再用 harness_status 查收并执行后续动作（收口/汇报）。`;
   const reason = rec.failReason ?? rec.error;
   if (rec.status !== "success" && reason) {
     text += ` 失败原因: ${sanitizeFailReason(reason)}`;
@@ -56,7 +78,9 @@ export function wakeAgent(rec: TaskRecord, cfg?: WakeAgentOptions): void {
   const key = `${rec.id}:${rec.status}`;
   if (wokenKeys.has(key)) return;
   wokenKeys.add(key);
-  const text = buildWakeText(rec);
+  // v0.4.12 direct 会话提取显式 target，让唤醒 turn 的确认消息能直接发出（system event run 无入站消息上下文）
+  const sessionKey = cfg.sessionKey?.trim();
+  const text = buildWakeText(rec, extractTargetFromSessionKey(sessionKey));
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_WAKE_TIMEOUT_MS;
   try {
     // CLI 探测：command -v openclaw，缺失则提示后跳过（不算失败重试，防重已生效）
@@ -66,7 +90,6 @@ export function wakeAgent(rec: TaskRecord, cfg?: WakeAgentOptions): void {
       return;
     }
     // 文本经 HB_WAKE_TEXT 环境变量传入，规避引号/注入问题；v0.4.12 sessionKey 非空时经 HB_WAKE_SESSION 追加 --session-key 定向唤醒用户可见会话，缺省保持原命令（走默认 main session）
-    const sessionKey = cfg.sessionKey?.trim();
     const command = sessionKey
       ? 'exec openclaw system event --text "$HB_WAKE_TEXT" --mode now --session-key "$HB_WAKE_SESSION"'
       : 'exec openclaw system event --text "$HB_WAKE_TEXT" --mode now';

@@ -23,7 +23,7 @@ beforeEach(() => {
   spawnSyncMock.mockReturnValue({ status: 0 });
 });
 
-const { buildWakeText, wakeAgent, resetWakeAgentState } = await import("./wake-agent.js");
+const { buildWakeText, wakeAgent, resetWakeAgentState, extractTargetFromSessionKey } = await import("./wake-agent.js");
 
 describe("wake-agent v0.4.12", () => {
   describe("buildWakeText 唤醒文本", () => {
@@ -60,6 +60,38 @@ describe("wake-agent v0.4.12", () => {
     it("failedReason 缺失时回退 error 字段", () => {
       const text = buildWakeText(rec({ status: "failed", error: "spawn ENOENT" }));
       expect(text).toContain("失败原因: spawn ENOENT");
+    });
+
+    it("ackTarget 有值：确认指示带显式 action/target/channel/accountId 与唤醒文案", () => {
+      const text = buildWakeText(rec(), "wx_user1@im.wechat");
+      expect(text).toContain(
+        "（action=send，target=wx_user1@im.wechat，channel=openclaw-weixin，accountId=90e2cc4ed712-im-bot），消息内容如「✅ 已自动唤醒，正在收口」",
+      );
+      expect(text).not.toContain("如「已自动唤醒，正在收口」）");
+    });
+
+    it("ackTarget 缺省：保持原指示（不带 target 细节）", () => {
+      const text = buildWakeText(rec());
+      expect(text).toContain("（如「已自动唤醒，正在收口」）");
+      expect(text).not.toContain("action=send");
+    });
+  });
+
+  describe("extractTargetFromSessionKey", () => {
+    it("微信 direct 格式：取 direct: 之后最后一段（含 @im.wechat）", () => {
+      expect(extractTargetFromSessionKey("agent:main:openclaw-weixin:direct:wx_user1@im.wechat")).toBe(
+        "wx_user1@im.wechat",
+      );
+    });
+
+    it("无 direct: 段 / 空白 / 缺省：返回 undefined", () => {
+      expect(extractTargetFromSessionKey("agent:main:weixin")).toBeUndefined();
+      expect(extractTargetFromSessionKey("  ")).toBeUndefined();
+      expect(extractTargetFromSessionKey(undefined)).toBeUndefined();
+    });
+
+    it("direct: 后为空：返回 undefined", () => {
+      expect(extractTargetFromSessionKey("agent:main:openclaw-weixin:direct:")).toBeUndefined();
     });
   });
 
@@ -103,6 +135,9 @@ describe("wake-agent v0.4.12", () => {
       expect(String(argv[1])).toContain('--session-key "$HB_WAKE_SESSION"');
       expect(opts.env.HB_WAKE_SESSION).toBe("agent:main:openclaw-weixin:direct:wx_user1");
       expect(opts.env.HB_WAKE_TEXT).toContain("任务 hb_sk（dsh）状态 success");
+      // v0.4.12 direct 会话：确认指示自动携带显式 target 与 accountId
+      expect(opts.env.HB_WAKE_TEXT).toContain("target=wx_user1，channel=openclaw-weixin，accountId=90e2cc4ed712-im-bot");
+      expect(opts.env.HB_WAKE_TEXT).toContain("✅ 已自动唤醒，正在收口");
       expect(child.unref).toHaveBeenCalled();
     });
 
@@ -122,6 +157,14 @@ describe("wake-agent v0.4.12", () => {
       spawnMock.mockReturnValue(childStub());
       wakeAgent(rec({ id: "hb_trim" }), { enabled: true, sessionKey: "  agent:main:weixin  " });
       expect(spawnMock.mock.calls[0][2].env.HB_WAKE_SESSION).toBe("agent:main:weixin");
+    });
+
+    it("sessionKey 非 direct 格式：唤醒文本不携带显式 target（保持原指示）", () => {
+      spawnMock.mockReturnValue(childStub());
+      wakeAgent(rec({ id: "hb_nodirect" }), { enabled: true, sessionKey: "agent:main:weixin" });
+      const text = spawnMock.mock.calls[0][2].env.HB_WAKE_TEXT as string;
+      expect(text).toContain("（如「已自动唤醒，正在收口」）");
+      expect(text).not.toContain("action=send");
     });
 
     it("防重：同任务同终态只注入一次，不同终态各自注入", () => {
