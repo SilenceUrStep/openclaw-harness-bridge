@@ -312,7 +312,7 @@ const configSchema = Type.Object({
       enabled: Type.Optional(
         Type.Boolean({
           description:
-            "v0.4.12 任务终态唤醒编排 agent 开关，默认 true；终态通知送达后经 openclaw system event 注入单行唤醒文本（成功需达 successNotifyMinDurationMs 门槛）",
+            "v0.4.12 任务终态唤醒编排 agent 开关，默认 false（默认关闭，存在同会话 writer 竞争等不稳定因素，显式配置 true 启用）；终态通知送达后经 openclaw system event 注入单行唤醒文本（成功需达 successNotifyMinDurationMs 门槛）",
         }),
       ),
       timeoutMs: Type.Optional(
@@ -643,9 +643,9 @@ const toolEntry = defineToolPlugin({
             ledger,
             tasksDir,
             notifyCommand: cfg.notifyCommand,
-            // v0.4.12 任务终态唤醒 agent：默认开启落在接线层（原语层 cfg 缺省时不注入，测试安全）；sessionKey 定向唤醒用户可见会话
+            // v0.4.12 任务终态唤醒 agent：默认关闭落在接线层（存在同会话 writer 竞争等不稳定因素，用户显式配置 enabled: true 才启用）；sessionKey 定向唤醒用户可见会话
             wakeAgent: {
-              enabled: cfg.wakeAgent?.enabled ?? true,
+              enabled: cfg.wakeAgent?.enabled ?? false,
               timeoutMs: cfg.wakeAgent?.timeoutMs,
               sessionKey: cfg.wakeAgent?.sessionKey,
             },

@@ -179,7 +179,7 @@ harness_status { }                                        // 查进度 / 结果
 | `successNotifyMinDurationMs` | 300000 | v0.4.4 — 任务时长达到阈值才推成功通知（≤0 禁用） |
 | `statusLineEnabled` | `true` | v0.4 — 每条出站回复追加后台任务状态行 |
 | `taskboardFile` | 无 | v0.4 — markdown 任务台账「进行中」段并入状态行 |
-| `wakeAgent.enabled` / `wakeAgent.timeoutMs` | `true` / 15000 | v0.4.12 — 任务终态经 `openclaw system event` 注入唤醒编排 agent（见「告警通道」） |
+| `wakeAgent.enabled` / `wakeAgent.timeoutMs` | `false`（默认关闭）/ 15000 | v0.4.12 — 任务终态经 `openclaw system event` 注入唤醒编排 agent（见「告警通道」） |
 
 ## 告警通道（Alert channels）
 

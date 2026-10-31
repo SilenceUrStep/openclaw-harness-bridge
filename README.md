@@ -213,7 +213,7 @@ the same table `harness_doctor` audits against. Quick reference:
 | `worktree.enabled` | `false` | v0.4.8 — allow `harness_run` `worktree=true` to run tasks in an isolated git worktree |
 | `doctorSchedule.enabled` / `doctorSchedule.hour` | `true` / 8 | v0.4.8 — scheduled doctor run (error-level findings push `doctor_report`) |
 | `hostVersionOverride` | none | v0.4.8 — pin the host version reported by self-check / doctor (skips auto-detect) |
-| `wakeAgent.enabled` / `wakeAgent.timeoutMs` | `true` / 15000 | v0.4.12 — task terminal states wake the orchestrating agent via `openclaw system event` injection (see "Alert channels") |
+| `wakeAgent.enabled` / `wakeAgent.timeoutMs` | `false` (default off) / 15000 | v0.4.12 — task terminal states wake the orchestrating agent via `openclaw system event` injection (see "Alert channels") |
 
 ## Alert channels
 
