@@ -38,6 +38,8 @@ the same source the `harness_doctor` config check uses (`src/lib/doctor.ts → C
 | `timeouts.sessionCheckMaxRetries` | `3` | v0.4.3 consecutive still-running checks before a stall alert |
 | `permissionAsk.enabled` | `true` | v0.4.12 OpenCode permission-ask human-approval channel (http tasks): probe pending permissions during the runner loop, push `HB_ALERT=permission_ask` once per requestID, expose `harness_permission` list/reply |
 | `permissionAsk.timeoutMs` | `1800000` | v0.4.12 pending-permission timeout ms (30 min); on expiry auto-`POST /permission/{id}/reply` with `reject` and push `HB_ALERT=permission_timeout` |
+| `wakeAgent.enabled` | `true` | v0.4.12 wake the orchestrating agent on task terminal states: after the terminal notification is delivered, inject a one-line wake text via `openclaw system event --mode now` (success requires duration ≥ `successNotifyMinDurationMs`; failed/timeout follow the 60s notify throttle window; deduped per task+status; fail-open) |
+| `wakeAgent.timeoutMs` | `15000` | v0.4.12 openclaw injection timeout ms; a missing/unresponsive `openclaw` CLI only logs a one-line warning and skips |
 | `worktree.enabled` | `false` | v0.4.8 allow `harness_run` `worktree=true` to run the task in an isolated git worktree (`<dataDir>/worktrees/<taskId>`, branch `hb-wt/<taskId>`); `false` degrades to normal execution with a ledger event |
 | `doctorSchedule.enabled` | `true` | v0.4.8 scheduled doctor run (v0.4.7 checks on a daily timer); error-level findings push `HB_ALERT=doctor_report` via `notifyCommand`, green/warn-only runs stay ledger-only |
 | `doctorSchedule.hour` | `8` | v0.4.8 doctor schedule hour (Asia/Shanghai), once per day |

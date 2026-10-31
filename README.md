@@ -213,6 +213,7 @@ the same table `harness_doctor` audits against. Quick reference:
 | `worktree.enabled` | `false` | v0.4.8 — allow `harness_run` `worktree=true` to run tasks in an isolated git worktree |
 | `doctorSchedule.enabled` / `doctorSchedule.hour` | `true` / 8 | v0.4.8 — scheduled doctor run (error-level findings push `doctor_report`) |
 | `hostVersionOverride` | none | v0.4.8 — pin the host version reported by self-check / doctor (skips auto-detect) |
+| `wakeAgent.enabled` / `wakeAgent.timeoutMs` | `true` / 15000 | v0.4.12 — task terminal states wake the orchestrating agent via `openclaw system event` injection (see "Alert channels") |
 
 ## Alert channels
 
@@ -244,6 +245,14 @@ render as explicit placeholders (`(no task id)`, `no exit code (startup failure)
 of a bare `?`; `task_failed` always includes the fail reason, the absolute log path and a
 `详情: harness_status taskId=xxx` follow-up hint; suppressed alerts list the suppressed task
 ids: `(60s window: N more tasks suppressed: id1, id2, …)`.
+
+v0.4.12 agent wake-up: when a task reaches a terminal state the plugin additionally injects
+a one-line wake text into the orchestrating agent via `openclaw system event --text <text> --mode now`
+(fire-and-forget, `wakeAgent.timeoutMs` guard). Success states follow the `successNotifyMinDurationMs`
+threshold (short tasks do not wake the agent); failed/timeout states follow the same 60s throttle
+window as `task_failed` alerts (suppressed ones are not injected). Each task+status wakes at most
+once, and any `openclaw` CLI problem only logs a one-line warning (fail-open). A successful wake
+means the orchestrating agent auto-collects the task result and proceeds with follow-up actions.
 
 ## Ledger and logs
 

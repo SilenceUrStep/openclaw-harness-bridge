@@ -27,6 +27,7 @@ import {
   sendStallAlert,
   truncatePrompt,
 } from "./runner.js";
+import type { WakeAgentOptions } from "./wake-agent.js";
 
 const SSE_ACCEPT = "text/event-stream";
 const EVENT_FLUSH_BATCH = 25;
@@ -420,6 +421,8 @@ export interface HttpRunOptions {
   ledger: Ledger;
   tasksDir: string;
   notifyCommand?: string;
+  /** v0.4.12 任务终态唤醒 agent（openclaw system event 注入）；缺省不注入 */
+  wakeAgent?: WakeAgentOptions;
   fallbackUsed?: boolean;
   /** v0.4.3 后台任务终态回调（重试/降级编排用）；wait=true 不触发 */
   onFinal?: (rec: TaskRecord) => void;
@@ -598,7 +601,7 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
       // 日志落盘失败不阻断
     }
     ledger.append(rec);
-    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
+    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs, opts.wakeAgent);
     return rec;
   };
 

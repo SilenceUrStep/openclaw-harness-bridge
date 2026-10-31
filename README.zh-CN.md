@@ -179,6 +179,7 @@ harness_status { }                                        // 查进度 / 结果
 | `successNotifyMinDurationMs` | 300000 | v0.4.4 — 任务时长达到阈值才推成功通知（≤0 禁用） |
 | `statusLineEnabled` | `true` | v0.4 — 每条出站回复追加后台任务状态行 |
 | `taskboardFile` | 无 | v0.4 — markdown 任务台账「进行中」段并入状态行 |
+| `wakeAgent.enabled` / `wakeAgent.timeoutMs` | `true` / 15000 | v0.4.12 — 任务终态经 `openclaw system event` 注入唤醒编排 agent（见「告警通道」） |
 
 ## 告警通道（Alert channels）
 
@@ -197,6 +198,12 @@ harness_status { }                                        // 查进度 / 结果
 | `task_success` | v0.4.4 — 长任务成功完成（时长 ≥ `successNotifyMinDurationMs`） | `HB_TASK_ID` `HB_HARNESS` `HB_DURATION` `HB_COST_TOKENS`（如有） `HB_TIME` |
 | `health_change` | 探活状态翻转 | `HB_ADAPTER` `HB_STATE` `HB_PREV_STATE` `HB_DETAIL` `HB_TIME` |
 | `selfcheck` | 升级后冒烟自检报告 | `HB_SELFCHECK` `HB_HOST_VERSION` `HB_DETAIL` `HB_TIME` |
+
+v0.4.12 任务完成唤醒 agent：任务到达终态后，在终态通知同一处经 `openclaw system event --text <单行文本> --mode now`
+向编排 agent 注入一条唤醒文本（fire-and-forget，`wakeAgent.timeoutMs` 约束）。成功态跟随
+`successNotifyMinDurationMs` 门槛（短任务不唤醒）；失败/超时态跟随 `task_failed` 的 60s 节流窗口
+（窗口内被抑制的不注入）；同任务同终态最多唤醒一次；`openclaw` CLI 异常只打一行 warning（fail-open）。
+唤醒即编排 agent 自动查收任务结果并执行后续动作（收口/汇报）。
 
 ## 台账与日志
 

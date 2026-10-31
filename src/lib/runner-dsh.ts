@@ -5,6 +5,7 @@ import { checkHealth, type Adapter } from "./adapters.js";
 import { truncate2kb, type Ledger, type LedgerEventType, type TaskRecord, type TimeoutSource } from "./ledger.js";
 import { buildBaseTaskRecord, newTaskId, notify, sendStallAlert, timestampId } from "./runner.js";
 import { checkVersionGate } from "./transport.js";
+import type { WakeAgentOptions } from "./wake-agent.js";
 
 /** RFC §4.1 事件线界：单行 8KB / 单事件 32KB，超限截断并带标记 */
 const MAX_LINE_CHARS = 8 * 1024;
@@ -42,6 +43,8 @@ export interface DshRunOptions {
   ledger: Ledger;
   tasksDir: string;
   notifyCommand?: string;
+  /** v0.4.12 任务终态唤醒 agent（openclaw system event 注入）；缺省不注入 */
+  wakeAgent?: WakeAgentOptions;
   fallbackUsed?: boolean;
   /** v0.4.3 后台任务终态回调（重试/降级编排用）；wait=true 不触发 */
   onFinal?: (rec: TaskRecord) => void;
@@ -460,7 +463,7 @@ async function executeDshTask(opts: DshRunOptions, base: TaskRecord): Promise<Ta
       ...(fr ? { failReason: fr } : {}),
     };
     opts.ledger.append(rec);
-    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
+    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs, opts.wakeAgent);
     return rec;
   };
 
@@ -653,6 +656,6 @@ export async function runDshHeadless(opts: DshRunOptions, base?: TaskRecord): Pr
   // 统一收口：事件落台账 + 终态回写 + 通知（成功/异常两分支共用）
   if (events.length) opts.ledger.addEvents(rec.id, events);
   opts.ledger.append(rec);
-  notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
+  notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs, opts.wakeAgent);
   return rec;
 }

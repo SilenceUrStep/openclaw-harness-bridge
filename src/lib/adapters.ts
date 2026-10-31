@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PermissionAskConfig } from "./permission.js";
+import type { WakeAgentOptions } from "./wake-agent.js";
 
 /** 插件包根目录（本文件编译后在 dist/lib/，回退两级到包根） */
 export const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -166,6 +167,8 @@ export interface BridgeConfig {
   timeouts?: RunTimeoutsConfig;
   /** v0.4.12 OpenCode 权限 ask 人工批准通道（enabled 默认 true，timeoutMs 挂起超时默认 30 分钟自动 reject） */
   permissionAsk?: PermissionAskConfig;
+  /** v0.4.12 任务终态唤醒编排 agent（openclaw system event 注入；enabled 默认 true，timeoutMs 默认 15000） */
+  wakeAgent?: WakeAgentOptions;
   /** v0.4.5 agent 层操作日志开关（默认开启，false 关闭） */
   agentOpsLogEnabled?: boolean;
   /** v0.4.5 agent 层操作日志文件路径，默认 <dataDir>/agent-ops.log */

@@ -4,6 +4,8 @@ import path from "node:path";
 import type { Adapter } from "./adapters.js";
 import type { Ledger, TaskRecord, TaskStatus, TimeoutSource, WorkspaceSource } from "./ledger.js";
 import { classifyFailure, failureAdvice } from "./resilience.js";
+import type { WakeAgentOptions } from "./wake-agent.js";
+import { wakeAgent } from "./wake-agent.js";
 
 /** v0.4.7 时间戳 id 生成（taskId / dsh sessionId 共用）：hb_20260101T000000Z_ab12 */
 export function timestampId(prefix: string, randLen = 4, now: Date = new Date()): string {
@@ -65,6 +67,8 @@ export interface RunOptions {
   ledger: Ledger;
   tasksDir: string;
   notifyCommand?: string;
+  /** v0.4.12 任务终态唤醒 agent（openclaw system event 注入）；缺省不注入 */
+  wakeAgent?: WakeAgentOptions;
   /** v0.4.3 后台任务终态回调（重试/降级编排用）；wait=true 不触发 */
   onFinal?: (rec: TaskRecord) => void;
 }
@@ -290,14 +294,16 @@ export function notify(
   notifyCommand: string | undefined,
   rec: TaskRecord,
   successNotifyMinDurationMs?: number,
+  wakeCfg?: WakeAgentOptions,
 ): void {
-  if (!notifyCommand) return;
   // v0.4.4 成功通知：任务时长 ≥ 阈值（默认 5 分钟）才推，≤0 禁用
   if (rec.status === "success") {
     const minMs = successNotifyMinDurationMs ?? DEFAULT_SUCCESS_NOTIFY_MIN_MS;
     if (minMs <= 0) return;
     if ((rec.durationMs ?? 0) < minMs) return;
-    notifySuccess(notifyCommand, rec);
+    if (notifyCommand) notifySuccess(notifyCommand, rec);
+    // v0.4.12 长任务成功后唤醒编排 agent（同门槛：短任务不唤醒）
+    wakeAgent(rec, wakeCfg);
     return;
   }
   // 失败/超时终态通知（60s 节流见下）
@@ -312,6 +318,9 @@ export function notify(
   const suppressed = st?.suppressed ?? 0;
   const suppressedIds = st?.suppressedIds ?? [];
   notifyState.set(key, { lastTs: now, suppressed: 0, suppressedIds: [] });
+  // v0.4.12 失败/超时后唤醒编排 agent（跟随节流窗口：抑制的不注入；通知送达结果不影响注入）
+  wakeAgent(rec, wakeCfg);
+  if (!notifyCommand) return;
   // v0.4.3 超时类失败（failReason 含 timeout）告警附建议：任务过大请拆分
   const advice = failureAdvice(classifyFailure(rec));
   const env = {
@@ -515,7 +524,7 @@ export function runTask(opts: RunOptions): TaskRecord {
     clearTimeout(timer);
     const rec = finalize(withPid, "failed", null, null, startedMs, null, logFile, err.message);
     opts.ledger.append(rec);
-    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
+    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs, opts.wakeAgent);
     try {
       opts.onFinal?.(rec);
     } catch {
@@ -537,7 +546,7 @@ export function runTask(opts: RunOptions): TaskRecord {
       logFile,
     );
     opts.ledger.append(rec);
-    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs);
+    notify(opts.notifyCommand, rec, opts.successNotifyMinDurationMs, opts.wakeAgent);
     try {
       opts.onFinal?.(rec);
     } catch {
