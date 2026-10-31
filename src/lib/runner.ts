@@ -387,6 +387,57 @@ export function sendStallAlert(
   }
 }
 
+/**
+ * v0.4.12 权限 ask 告警（permission_ask / permission_timeout，OpenCode http 任务）：
+ * spawn fire-and-forget（同 stall 告警通道）；permission_ask 60s 节流窗口与既有告警一致，
+ * 同一 requestID 只推一次（内存 Set 去重；窗口内被节流的 request 不标记，待下个轮询节拍补推）；
+ * permission_timeout 每requestID仅一次且豁免节流（安全关键：自动拒绝必须告知人工）。
+ */
+const PERMISSION_ALERT_WINDOW_MS = 60_000;
+const permissionAlertSeen = new Set<string>();
+let permissionAlertLastTs = 0;
+
+/** 供测试重置去重与节流状态 */
+export function resetPermissionAlerts(): void {
+  permissionAlertSeen.clear();
+  permissionAlertLastTs = 0;
+}
+
+export function sendPermissionAlert(
+  notifyCommand: string | undefined,
+  alert: "permission_ask" | "permission_timeout",
+  info: { taskId: string; sessionId?: string; requestId: string; detail: string },
+): void {
+  if (!notifyCommand) return;
+  // 去重键 = 告警类型:requestID —— 同一 requestID 的 permission_ask 只推一次，
+  // 且不吞掉后续 permission_timeout（不同告警类型，语义不同需分别告知）
+  const dedupKey = `${alert}:${info.requestId}`;
+  if (permissionAlertSeen.has(dedupKey)) return;
+  const now = Date.now();
+  // permission_timeout 豁免节流窗口：每 requestID 仅一次（dedupKey 已去重），且属安全关键通知
+  // （自动拒绝需告知人工），不参与 60s 滑窗；permission_ask 与既有告警一致按 60s 节流
+  if (alert !== "permission_timeout" && now - permissionAlertLastTs < PERMISSION_ALERT_WINDOW_MS) return;
+  permissionAlertSeen.add(dedupKey);
+  permissionAlertLastTs = now;
+  try {
+    const child = spawn("bash", ["-c", notifyCommand], {
+      env: {
+        ...process.env,
+        HB_ALERT: alert,
+        HB_TASK_ID: info.taskId,
+        HB_SESSION_ID: info.sessionId ?? "",
+        HB_REQUEST_ID: info.requestId,
+        HB_PERMISSION_DETAIL: info.detail.length > 800 ? `${info.detail.slice(0, 800)}…` : info.detail,
+        HB_TIME: new Date().toISOString(),
+      },
+      stdio: "ignore",
+    });
+    child.unref?.();
+  } catch {
+    // 告警失败不影响任务执行
+  }
+}
+
 /** 执行任务：wait=true 同步等待；wait=false 后台执行（退出后回写台账 + 可选通知） */
 export function runTask(opts: RunOptions): TaskRecord {
   const argv = buildArgv(opts);

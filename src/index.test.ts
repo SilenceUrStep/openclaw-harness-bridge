@@ -19,11 +19,12 @@ afterAll(async () => {
 });
 
 describe("harness-bridge", () => {
-  it("declares the MVP tools (v0.4.7: + harness_doctor)", () => {
+  it("declares the MVP tools (v0.4.7: + harness_doctor, v0.4.12: + harness_permission)", () => {
     expect(getToolPluginMetadata(entry)?.tools.map((t) => t.name).sort()).toEqual([
       "harness_doctor",
       "harness_list",
       "harness_mount",
+      "harness_permission",
       "harness_run",
       "harness_status",
       "harness_sync_models",

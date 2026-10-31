@@ -102,6 +102,28 @@ describe("hb_notify.sh 渲染（v0.4.7 可行动性改造）", () => {
     expect(render({ HB_ALERT: "task_success", HB_DURATION: "6m40s" })).toContain("[harness通知·task-success]");
   });
 
+  it("permission_ask / permission_timeout 分支（v0.4.12）：权限标记 + requestID + 详情，不落 task_failed", () => {
+    const ask = render({
+      HB_ALERT: "permission_ask",
+      HB_TASK_ID: "hb_p1",
+      HB_SESSION_ID: "ses_1",
+      HB_REQUEST_ID: "per_1",
+      HB_PERMISSION_DETAIL: "权限=bash patterns=[rm -rf *]",
+    });
+    expect(ask).toContain("[harness告警·permission-ask]");
+    expect(ask).toContain("请求: per_1");
+    expect(ask).toContain("权限=bash patterns=[rm -rf *]");
+    expect(ask).not.toContain("任务失败");
+    const timeout = render({
+      HB_ALERT: "permission_timeout",
+      HB_TASK_ID: "hb_p1",
+      HB_REQUEST_ID: "per_1",
+      HB_PERMISSION_DETAIL: "权限=edit",
+    });
+    expect(timeout).toContain("[harness告警·permission-timeout]");
+    expect(timeout).toContain("已自动拒绝");
+  });
+
   it("doctor_report 分支（v0.4.8）：[harness体检] 标题渲染 HB_DETAIL 异常摘要，不落 task_failed", () => {
     const msg = render({
       HB_ALERT: "doctor_report",

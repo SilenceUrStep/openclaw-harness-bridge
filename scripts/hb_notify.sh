@@ -15,6 +15,8 @@
 #   selfcheck:             HB_SELFCHECK / HB_HOST_VERSION / HB_DETAIL / HB_TIME
 #   daily_report:          HB_NOTIFY (report text) / HB_REPORT_DATE (v0.4.7 ledger daily report)
 #   doctor_report:         HB_DETAIL (anomaly digest) / HB_TIME (v0.4.8 scheduled doctor check)
+#   permission_ask:        HB_TASK_ID / HB_SESSION_ID / HB_REQUEST_ID / HB_PERMISSION_DETAIL / HB_TIME (v0.4.12)
+#   permission_timeout:    HB_TASK_ID / HB_SESSION_ID / HB_REQUEST_ID / HB_PERMISSION_DETAIL / HB_TIME (v0.4.12)
 # v0.4.7: every alert carries a source marker ([harness告警·type]); bare `?` fallbacks replaced
 # with explicit placeholders; task_failed always renders fail reason + absolute log path +
 # follow-up hint; suppressed alerts list the suppressed task ids, not just a count.
@@ -51,6 +53,22 @@ ${HB_DETAIL:-(no detail)}
     MSG="[harness告警·stall] 任务停滞（连续核查无进展）
 任务: ${HB_TASK_ID:-(no task id)}
 ${HB_DETAIL:-(no detail)}
+时间: ${HB_TIME:-(unknown time)}"
+    ;;
+  permission_ask)
+    MSG="[harness告警·permission-ask] 任务等待权限批准（配合 harness_permission reply 人工放行）
+任务: ${HB_TASK_ID:-(no task id)}
+会话: ${HB_SESSION_ID:-(no session id)}
+请求: ${HB_REQUEST_ID:-(no request id)}
+${HB_PERMISSION_DETAIL:-(no detail)}
+时间: ${HB_TIME:-(unknown time)}"
+    ;;
+  permission_timeout)
+    MSG="[harness告警·permission-timeout] 权限挂起超时，已自动拒绝
+任务: ${HB_TASK_ID:-(no task id)}
+会话: ${HB_SESSION_ID:-(no session id)}
+请求: ${HB_REQUEST_ID:-(no request id)}
+${HB_PERMISSION_DETAIL:-(no detail)}
 时间: ${HB_TIME:-(unknown time)}"
     ;;
   task_success)

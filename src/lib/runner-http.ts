@@ -12,9 +12,18 @@ import {
 } from "./ledger.js";
 import { buildHttpHeaders, type HttpTransport } from "./transport.js";
 import {
+  describePermission,
+  fetchPendingPermissions,
+  replyPermission,
+  resolvePermissionAskConfig,
+  type PendingPermissionRequest,
+  type PermissionAskConfig,
+} from "./permission.js";
+import {
   buildBaseTaskRecord,
   newTaskId,
   notify,
+  sendPermissionAlert,
   sendStallAlert,
   truncatePrompt,
 } from "./runner.js";
@@ -406,6 +415,8 @@ export interface HttpRunOptions {
   timeoutSource?: TimeoutSource;
   /** v0.4.4 成功通知阈值毫秒：任务时长达到阈值才推成功通知；≤0 禁用（默认 300000） */
   successNotifyMinDurationMs?: number;
+  /** v0.4.12 权限 ask 人工批准通道配置（enabled 默认 true，timeoutMs 挂起超时默认 30 分钟） */
+  permissionAsk?: PermissionAskConfig;
   ledger: Ledger;
   tasksDir: string;
   notifyCommand?: string;
@@ -602,6 +613,7 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
       lastText = e.text;
       if (permissionPending) {
         permissionPending = null;
+        perm = null; // v0.4.12 会话已恢复产出，挂起权限视为已批准
         ledger.append({ ...base, sessionId, status: "running" });
       }
     } else if (e.kind === "error") {
@@ -610,9 +622,21 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
       if (isDeny(e.permissionResponse)) {
         failReason ??= `permission denied: ${e.permissionTitle ?? e.permissionId ?? "unknown"}`;
         permissionPending = null;
+        perm = null;
       } else {
         permissionPending = { id: e.permissionId, title: e.permissionTitle };
+        // v0.4.12 记录挂起起点（SSE 事件即探针），并即时触发探测补齐详情 + 推 permission_ask 告警
+        if (e.permissionId && (!perm || perm.requestId !== e.permissionId)) {
+          perm = {
+            requestId: e.permissionId,
+            title: e.permissionTitle ?? "unknown",
+            askedAt: Date.now(),
+            alerted: false,
+            rejected: false,
+          };
+        }
         ledger.append({ ...base, sessionId, status: "waiting_permission" });
+        void syncPermissions().catch(() => {});
       }
     } else if (e.kind === "status" && e.status === "idle") {
       settled = true;
@@ -623,6 +647,7 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
       }
     } else if ((e.kind === "step_start" || e.kind === "tool_use") && permissionPending) {
       permissionPending = null;
+      perm = null; // v0.4.12 权限已批准，会话恢复执行
       ledger.append({ ...base, sessionId, status: "running" });
     }
   };
@@ -647,6 +672,85 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
     }
     const se = mapEnvelope(env);
     if (se) handleStructured(se);
+  };
+
+  // ── v0.4.12 权限 ask 人工批准通道（OpenCode http）───────────────────────────
+  // 探测/告警/超时守护全挂既有循环节拍（while 循环顶部 + permission 事件即时触发），不新增独立定时器。
+  const permissionCfg = resolvePermissionAskConfig(opts.permissionAsk);
+  /** 当前挂起权限（单请求模型：OpenCode 每 session 一次只阻塞一个 ask） */
+  let perm: { requestId: string; title: string; askedAt: number; alerted: boolean; rejected: boolean } | null = null;
+
+  /**
+   * 权限挂起探测（fail-open）：GET /permission 按当前 session 过滤，发现新挂起请求即推
+   * HB_ALERT=permission_ask（env 含 HB_REQUEST_ID/HB_PERMISSION_DETAIL；同 requestID 只推一次，
+   * 60s 节流见 runner.sendPermissionAlert）。探测失败静默返回，绝不影响任务执行。
+   */
+  const syncPermissions = async (): Promise<void> => {
+    if (!permissionCfg.enabled || settled || finished || !sessionId) return;
+    let pending: PendingPermissionRequest[];
+    try {
+      pending = await fetchPendingPermissions(transport, { sessionId, cwd: opts.cwd });
+    } catch {
+      return; // 探测失败不影响任务执行（fail-open）
+    }
+    const cur = pending[0];
+    if (!cur) return;
+    if (!perm || perm.requestId !== cur.requestId) {
+      perm = { requestId: cur.requestId, title: cur.permission, askedAt: Date.now(), alerted: false, rejected: false };
+    }
+    if (!perm.alerted) {
+      perm.alerted = true;
+      const detail = describePermission(cur);
+      sendPermissionAlert(opts.notifyCommand, "permission_ask", {
+        taskId: base.id,
+        sessionId,
+        requestId: cur.requestId,
+        detail,
+      });
+      trackEvent("permission_alert", { requestId: cur.requestId, permission: cur.permission, detail });
+    }
+  };
+
+  /**
+   * 挂起超时守护：挂起超 permissionAsk.timeoutMs（默认 30 分钟）→ 自动 POST reject（fail-open）
+   * + 推 HB_ALERT=permission_timeout。挂在 while 循环节拍上（SSE 静默期由 idle 定时器驱动节拍）。
+   */
+  const guardPermissionTimeout = async (): Promise<void> => {
+    if (!permissionCfg.enabled || settled || finished || !sessionId) return;
+    await syncPermissions(); // 顺带补探测（同 requestID 去重内建）
+    if (!perm || perm.rejected || Date.now() - perm.askedAt < permissionCfg.timeoutMs) return;
+    perm.rejected = true;
+    let rejected = false;
+    let rejectError: string | undefined;
+    try {
+      await replyPermission(transport, perm.requestId, "reject", { cwd: opts.cwd });
+      rejected = true;
+    } catch (err) {
+      rejectError = (err as Error).message; // reject 失败不阻断任务（fail-open），仍推告警请人工介入
+    }
+    const snapshot: PendingPermissionRequest = {
+      requestId: perm.requestId,
+      sessionId,
+      permission: perm.title,
+      patterns: [],
+    };
+    sendPermissionAlert(opts.notifyCommand, "permission_timeout", {
+      taskId: base.id,
+      sessionId,
+      requestId: perm.requestId,
+      detail: `权限挂起超 ${permissionCfg.timeoutMs}ms 已自动${rejected ? "" : "尝试"}拒绝${
+        rejectError ? `（reject 失败: ${rejectError}）` : ""
+      }，请人工核查：${describePermission(snapshot)}`,
+    });
+    trackEvent("permission_auto_reject", {
+      requestId: perm.requestId,
+      permission: perm.title,
+      pendingMs: Date.now() - perm.askedAt,
+      rejected,
+      ...(rejectError ? { error: rejectError } : {}),
+    });
+    permissionPending = null; // 已代为拒绝，终态结算不再记「permission.asked 未响应」
+    ledger.append({ ...base, sessionId, status: "running" });
   };
 
   const backfill = async (): Promise<void> => {
@@ -824,6 +928,8 @@ async function executeHttpTask(opts: HttpRunOptions, base: TaskRecord): Promise<
     let lastEventId: string | undefined;
     armIdle();
     while (!settled && !maxFired) {
+      // v0.4.12 权限挂起守护：复用循环节拍检查挂起超时（SSE 静默期由 idle 定时器驱动节拍，不新增定时器）
+      await guardPermissionTimeout().catch(() => {});
       // 核查分流：idle/兜底定时器置位的核查请求统一在循环顶部消费
       if (checkCause === "max_duration") {
         const rec = await runSessionCheck("max_duration");

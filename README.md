@@ -233,10 +233,13 @@ Machine-specific values are injected via env (never hardcoded in the script): `H
 | `selfcheck` | Post-upgrade smoke self-check report | `HB_SELFCHECK` `HB_HOST_VERSION` `HB_DETAIL` `HB_TIME` |
 | `daily_report` | v0.4.7 — ledger daily report (pushed by the built-in timer) | `HB_NOTIFY` (report text) `HB_REPORT_DATE` |
 | `doctor_report` | v0.4.8 — scheduled doctor found error-level checks (once per day; green/warn-only runs stay ledger-only) | `HB_DETAIL` (anomaly digest) `HB_TIME` |
+| `permission_ask` | v0.4.12 — OpenCode task is blocked on a permission ask (probe during the runner loop; once per requestID, `harness_permission` reply for manual approval) | `HB_TASK_ID` `HB_SESSION_ID` `HB_REQUEST_ID` `HB_PERMISSION_DETAIL` (tool name + args digest, truncated at 800 chars) `HB_TIME` |
+| `permission_timeout` | v0.4.12 — permission pending exceeded `permissionAsk.timeoutMs` (default 30 min); auto-rejected via the reply endpoint (not throttled, once per requestID) | `HB_TASK_ID` `HB_SESSION_ID` `HB_REQUEST_ID` `HB_PERMISSION_DETAIL` `HB_TIME` |
 
 v0.4.7 rendering contract (bundled script): every alert title carries a source marker —
 `[harness告警·task-failed]` / `[harness告警·stall]` / `[harness告警·watchdog]` /
-`[harness告警·selfcheck]` / `[harness通知·task-success]` / `[harness日报]` / `[harness体检]`; unset variables
+`[harness告警·selfcheck]` / `[harness通知·task-success]` / `[harness日报]` / `[harness体检]` /
+`[harness告警·permission-ask]` / `[harness告警·permission-timeout]` (v0.4.12); unset variables
 render as explicit placeholders (`(no task id)`, `no exit code (startup failure)`, …) instead
 of a bare `?`; `task_failed` always includes the fail reason, the absolute log path and a
 `详情: harness_status taskId=xxx` follow-up hint; suppressed alerts list the suppressed task

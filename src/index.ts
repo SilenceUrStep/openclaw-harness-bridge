@@ -29,6 +29,7 @@ import {
 } from "./lib/runner.js";
 import { runHttpTask } from "./lib/runner-http.js";
 import { runDshTask } from "./lib/runner-dsh.js";
+import { describePermission, fetchPendingPermissions, replyPermission } from "./lib/permission.js";
 import {
   cliFallbackOf,
   probeHttpHealth,
@@ -287,6 +288,22 @@ const configSchema = Type.Object({
       ),
       sessionCheckMaxRetries: Type.Optional(
         Type.Number({ description: "连续会话核查仍 running 的告警阈值次数，默认 3" }),
+      ),
+    }),
+  ),
+  permissionAsk: Type.Optional(
+    Type.Object({
+      enabled: Type.Optional(
+        Type.Boolean({
+          description:
+            "v0.4.12 OpenCode 权限 ask 人工批准通道开关，默认 true；开启后 runner 轮询挂起权限并推 permission_ask 微信告警",
+        }),
+      ),
+      timeoutMs: Type.Optional(
+        Type.Number({
+          description:
+            "v0.4.12 权限挂起超时毫秒，默认 1800000（30 分钟）；超时自动 POST reject 并推 permission_timeout 告警",
+        }),
       ),
     }),
   ),
@@ -643,6 +660,8 @@ const toolEntry = defineToolPlugin({
               maxDurationMs: timeoutMs,
               idleTimeoutMs: cfg.timeouts?.idleTimeoutMs,
               sessionCheckMaxRetries: cfg.timeouts?.sessionCheckMaxRetries,
+              // v0.4.12 权限 ask 人工批准通道：探测/告警/超时守护经 runner-http 循环节拍执行
+              permissionAsk: cfg.permissionAsk,
             });
             return { ok: true, rec: trackResolved(rec) };
           }
@@ -903,6 +922,98 @@ const toolEntry = defineToolPlugin({
           tasks,
           summary: summarizeCost(recs),
         };
+      },
+    }),
+
+    tool({
+      name: "harness_permission",
+      label: "Harness Permission",
+      description:
+        "v0.4.12 OpenCode 权限 ask 人工批准通道：action=list 列出当前挂起的权限请求（requestID/sessionID/权限名/参数详情，并尝试映射所属任务 taskId），action=reply 对指定 requestID 提交审批（reply=once 仅本次放行 | always 永久放行 | reject 拒绝）。配合微信 permission_ask 告警使用：收到告警后用本工具查看详情并放行/拒绝，挂起超 permissionAsk.timeoutMs（默认 30 分钟）会被自动 reject。",
+      parameters: Type.Object({
+        action: Type.Union([Type.Literal("list"), Type.Literal("reply")], {
+          description: "list=列出挂起权限请求；reply=提交审批",
+        }),
+        harness: Type.Optional(
+          Type.String({ description: "指定 harness（默认取第一个 http transport 的 harness，即 OpenCode）" }),
+        ),
+        sessionId: Type.Optional(Type.String({ description: "list 时按会话过滤（不传列全部）" })),
+        requestId: Type.Optional(
+          Type.String({ description: "reply 时必填：权限请求 ID（per_ 前缀，来自 list 或告警 HB_REQUEST_ID）" }),
+        ),
+        reply: Type.Optional(
+          Type.Union([Type.Literal("once"), Type.Literal("always"), Type.Literal("reject")], {
+            description: "reply 时必填：once=仅本次放行；always=永久放行该规则；reject=拒绝",
+          }),
+        ),
+        message: Type.Optional(Type.String({ description: "reply 时可选附言（透传给 OpenCode）" })),
+      }),
+      execute: async (params, config) => {
+        const cfg = config as BridgeConfig;
+        const all = listAdapters(cfg);
+        let adapter = params.harness ? all.find((a) => a.id === params.harness) : undefined;
+        if (params.harness && !adapter) {
+          return { error: `未知 harness: ${params.harness}（可用: ${all.map((a) => a.id).join(", ")}）` };
+        }
+        if (!adapter) {
+          adapter = all.find((a) => resolveTransport(a).kind === "http");
+          if (!adapter) return { error: "无 http transport 的 harness（权限 ask 通道仅支持 OpenCode http）" };
+        }
+        const resolved = resolveTransport(adapter);
+        if (resolved.kind !== "http") {
+          return { error: `harness ${adapter.id} 非 http transport，权限 ask 通道不适用` };
+        }
+        const ht = resolved.config as HttpTransport;
+        if (params.action === "reply") {
+          if (!params.requestId) return { error: "reply 需要 requestId（来自 harness_permission list 或告警 HB_REQUEST_ID）" };
+          if (!params.reply) return { error: "reply 需要 reply 参数（once | always | reject）" };
+          try {
+            await replyPermission(ht, params.requestId, params.reply, {
+              cwd: cfg.globalWorkspace ? expandHome(cfg.globalWorkspace) : undefined,
+              message: params.message,
+            });
+            return { ok: true, requestId: params.requestId, reply: params.reply };
+          } catch (err) {
+            return { ok: false, requestId: params.requestId, error: (err as Error).message };
+          }
+        }
+        // action=list
+        try {
+          const pending = await fetchPendingPermissions(ht, {
+            sessionId: params.sessionId,
+            cwd: cfg.globalWorkspace ? expandHome(cfg.globalWorkspace) : undefined,
+          });
+          // sessionId → taskId 映射：台账 latest 后按会话过滤（v0.4.12）
+          const ledger = openLedger(cfg);
+          const bySession = new Map<string, TaskRecord>();
+          for (const rec of ledger.latest({ harness: adapter.id }, 100)) {
+            if (rec.sessionId && !bySession.has(rec.sessionId)) bySession.set(rec.sessionId, rec);
+          }
+          const requests = pending.map((p) => {
+            const task = bySession.get(p.sessionId);
+            return {
+              requestId: p.requestId,
+              sessionId: p.sessionId,
+              permission: p.permission,
+              patterns: p.patterns,
+              metadata: p.metadata,
+              ...(task ? { taskId: task.id, taskStatus: task.status } : {}),
+              detail: describePermission(p),
+              hint: `审批: harness_permission action=reply requestId=${p.requestId} reply=once|always|reject`,
+            };
+          });
+          return {
+            ok: true,
+            total: requests.length,
+            requests,
+            hint:
+              requests.length > 0
+                ? "挂起权限会阻塞任务；配合微信 permission_ask 告警人工批准，超时未批将自动 reject"
+                : undefined,
+          };
+        } catch (err) {
+          return { ok: false, error: `权限探测失败（不影响任务执行）: ${(err as Error).message}` };
+        }
       },
     }),
   ],

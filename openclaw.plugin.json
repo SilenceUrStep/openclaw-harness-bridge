@@ -2,7 +2,7 @@
   "id": "harness-bridge",
   "name": "Harness Bridge",
   "description": "Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, ...) from OpenClaw.",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "configSchema": {
     "type": "object",
     "properties": {
