@@ -69,8 +69,34 @@ let checkpointTimer: NodeJS.Timeout | null = null;
 let lostSweepTimer: NodeJS.Timeout | null = null;
 /** v0.4.8 doctor 定时体检（每分钟 tick，到点执行） */
 let doctorScheduleTimer: NodeJS.Timeout | null = null;
+/** v0.4.8 台账日报定时器（每分钟 tick，到点执行） */
+let dailyReportTimer: NodeJS.Timeout | null = null;
+/** v0.4.11 watchdog 提升为模块级：插件 reload 不经 gateway_stop，闭包局部引用重建后旧实例失控 */
+let watchdog: HealthWatchdog | null = null;
 /** v0.4.2 自动登记：toolCallId → 预登记条目 key（before/after 钩子串联） */
 const autoRegMap = new Map<string, string>();
+
+/**
+ * v0.4.11 统一定时器收口：停 watchdog + 全部周期 timer（每类均有 null 守卫，幂等可重复调用）。
+ * register 重载入口先调一次防多实例并行累积；gateway_stop 复用同一收口。
+ */
+function stopAllTimers(): void {
+  try {
+    watchdog?.stop();
+    watchdog = null;
+  } catch {
+    // fail-open：清理失败不影响其余定时器与主功能
+  }
+  for (const t of [cleanupTimer, metricsSaveTimer, checkpointTimer, lostSweepTimer, doctorScheduleTimer, dailyReportTimer]) {
+    if (t) clearInterval(t);
+  }
+  cleanupTimer = null;
+  metricsSaveTimer = null;
+  checkpointTimer = null;
+  lostSweepTimer = null;
+  doctorScheduleTimer = null;
+  dailyReportTimer = null;
+}
 
 /** v0.4.2 惰性清理用：台账中仍 running（pid 存活）的 taskId 集合 */
 function aliveRunningTaskIds(cfg: BridgeConfig): Set<string> {
@@ -875,6 +901,9 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
     "Register, configure, delegate and monitor coding-agent harnesses (OpenCode, Claude Code, Codex CLI, ...) from OpenClaw.",
   configSchema: buildJsonPluginConfigSchema(configSchema as unknown as Record<string, unknown>),
   register(api) {
+    // v0.4.11 防重入清理：插件 reload 不触发 gateway_stop，先收口上一实例的全部定时器/watchdog，
+    // 否则 HealthWatchdog/doctor-schedule/dailyReport 等多实例并行累积（task_event 6 倍速佐证）
+    stopAllTimers();
     toolEntry.register(api);
     const cfg = (api.pluginConfig ?? {}) as BridgeConfig & {
       statusLineEnabled?: boolean;
@@ -890,7 +919,6 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
     const ledgerLegacyFile = path.join(dataDir, "ledger.jsonl");
     /** v0.4.3 自检用：已注册 hook 名单（按实际注册顺序记录） */
     const activeHooks: string[] = [];
-    let watchdog: HealthWatchdog | null = null;
 
     // v0.4 状态行钩子：出站消息强制追加「后台任务」状态行
     if (cfg.statusLineEnabled !== false) {
@@ -1060,10 +1088,10 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
     }
 
     // v0.4.6 台账日报：每天固定时间（默认 21 点 Asia/Shanghai）聚合昨日数据经 notifyCommand 推送
-    // （内部自带 setInterval，不是 hook，不进 activeHooks）
+    // （内部自带 setInterval，不是 hook，不进 activeHooks；v0.4.11 返回 timer 供统一收口清理）
     if (cfg.dailyReport?.enabled !== false) {
       try {
-        registerDailyReport({
+        dailyReportTimer = registerDailyReport({
           cfg,
           ledgerDbPath,
           notifyCommand: cfg.notifyCommand,
@@ -1088,6 +1116,8 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
           cfg,
           ledger: openLedger(cfg),
           notifyCommand: cfg.notifyCommand,
+          // v0.4.11 「今日已推」标记持久化：重载后新实例读回标记，不再同秒重复推送
+          stateFile: path.join(dataDir, "doctor-sent-dates.json"),
         });
       } catch {
         // 定时体检启动失败不影响主功能
@@ -1140,45 +1170,23 @@ const entry: ReturnType<typeof definePluginEntry> = definePluginEntry({
     checkpointTimer.unref?.();
 
     // 网关停止时释放采样器与定时器（v0.4.2：停止前 flush 观测数据）
+    // v0.4.11 定时器/watchdog 收口统一走 stopAllTimers()（与 register 重载入口共用）
     api.on("gateway_stop", async () => {
-      try {
-        watchdog?.stop();
-        watchdog = null;
-      } catch {
-        // ignore
-      }
-      // v0.4.10 采样器关闭时安全跳过（未启动即无数据可 flush）
+      // v0.4.10 采样器关闭时安全跳过（未启动即无数据可 flush）；flush 需 dataDir，保留在此处
       if (cfg.sampler?.enabled === true) {
         try {
           metricsSampler.saveToDisk(path.join(dataDir, "metrics.json"));
         } catch {
           // ignore
         }
+      }
+      stopAllTimers();
+      if (cfg.sampler?.enabled === true) {
         try {
           metricsSampler.stop();
         } catch {
           // ignore
         }
-      }
-      if (cleanupTimer) {
-        clearInterval(cleanupTimer);
-        cleanupTimer = null;
-      }
-      if (metricsSaveTimer) {
-        clearInterval(metricsSaveTimer);
-        metricsSaveTimer = null;
-      }
-      if (checkpointTimer) {
-        clearInterval(checkpointTimer);
-        checkpointTimer = null;
-      }
-      if (lostSweepTimer) {
-        clearInterval(lostSweepTimer);
-        lostSweepTimer = null;
-      }
-      if (doctorScheduleTimer) {
-        clearInterval(doctorScheduleTimer);
-        doctorScheduleTimer = null;
       }
     });
   },

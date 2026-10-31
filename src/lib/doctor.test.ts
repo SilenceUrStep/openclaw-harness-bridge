@@ -221,6 +221,61 @@ describe("doctor worktree 残留检查（v0.4.8）", () => {
   });
 });
 
+describe("doctor stub adapter 降噪（v0.4.11）", () => {
+  it("未安装 stub（claude-code/codex）→ 探活与 binary 诊断降级 warn，不触发每日推送", async () => {
+    const report = await runDoctor({ notifyCommand: "bash hb_notify.sh" } as BridgeConfig, {
+      probe: async () => [
+        status({ id: "claude-code", binary: "claude", installed: false, healthy: false, healthDetail: "binary 不可用" }),
+        status({ id: "codex", binary: "codex", installed: false, healthy: false, healthDetail: "binary 不可用" }),
+        status({}),
+      ],
+      api: { openclawVersion: "2026.9.4" },
+    });
+    const [adapters, , binaries] = report.checks;
+    expect(adapters.level).toBe("warn");
+    expect(adapters.summary).toContain("claude-code, codex（未安装 stub，不参与告警）");
+    expect(adapters.detail).toBeUndefined(); // 降噪项不列修复建议（避免误导安装 stub binary）
+    expect(binaries.level).toBe("warn");
+    expect(binaries.summary).toContain("（未安装 stub，不参与告警）");
+    expect(report.allOk).toBe(true); // 无 error → 不再每日推送
+  });
+
+  it("已安装 adapter 异常仍为 error（降级仅限未安装 stub）", async () => {
+    const report = await runDoctor({ notifyCommand: "bash hb_notify.sh" } as BridgeConfig, {
+      probe: async () => [
+        status({ id: "claude-code", binary: "claude", installed: true, healthy: false, healthDetail: "版本门禁未通过" }),
+        status({}),
+      ],
+      api: { openclawVersion: "2026.9.4" },
+    });
+    const [adapters, , binaries] = report.checks;
+    expect(adapters.level).toBe("error");
+    expect(adapters.summary).toContain("claude-code");
+    expect(adapters.summary).not.toContain("不参与告警"); // 已安装不走 stub 降噪
+    expect(adapters.detail).toContain("建议");
+    expect(report.allOk).toBe(false);
+  });
+
+  it("混合：真实异常 error + 未安装 stub 仅标注；binary 诊断只报真实缺失项", async () => {
+    const report = await runDoctor({} as BridgeConfig, {
+      probe: async () => [
+        status({ id: "bad", installed: false, healthy: false, healthDetail: "binary 不可用" }),
+        status({ id: "codex", binary: "codex", installed: false, healthy: false, healthDetail: "binary 不可用" }),
+        status({}),
+      ],
+      api: { openclawVersion: "2026.9.4" },
+    });
+    const [adapters, , binaries] = report.checks;
+    expect(adapters.level).toBe("error");
+    expect(adapters.summary).toContain("异常: bad");
+    expect(adapters.summary).toContain("未安装 stub: codex（未安装 stub，不参与告警）");
+    expect(binaries.level).toBe("error");
+    expect(binaries.detail).toContain("bad（opencode）"); // 仅真实缺失项列诊断线索
+    expect(binaries.summary).toContain("另 1 个未安装 stub 不定位");
+    expect(report.allOk).toBe(false);
+  });
+});
+
 describe("doctor hostVersionOverride（v0.4.8）", () => {
   it("配置覆盖 → 宿主版本检查直接采用该值（跳过特性检测）", async () => {
     const report = await runDoctor({ hostVersionOverride: "2026.7.1-2" } as BridgeConfig, {

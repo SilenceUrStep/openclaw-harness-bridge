@@ -162,8 +162,9 @@ const sentDates = new Map<string, boolean>();
  * 注册台账日报定时器：每分钟检查上海时间到达 cfg.dailyReport.hour（默认 21）点
  * 且今日未发过 → buildDailyReport → 经 notifyCommand 推送（HB_NOTIFY 环境变量注入，同 watchdog 通道）。
  * 未配置 notifyCommand 时不发送。timer.unref()，全链路 fail-open。
+ * v0.4.11 返回 timer 供 register 防重入清理（重载时先 clearInterval 旧实例，防多实例并行）。
  */
-export function registerDailyReport(opts: DailyReportOptions): void {
+export function registerDailyReport(opts: DailyReportOptions): NodeJS.Timeout {
   const hour = opts.cfg.dailyReport?.hour ?? 21;
   const tick = (): void => {
     try {
@@ -198,4 +199,5 @@ export function registerDailyReport(opts: DailyReportOptions): void {
   tick();
   const timer = setInterval(tick, 60_000);
   timer.unref?.();
+  return timer;
 }

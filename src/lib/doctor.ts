@@ -66,6 +66,14 @@ export function renderDoctorReport(report: DoctorReport): string {
 
 /* ---------------- 检查 1-3：adapter 健康 / 版本 / binary 诊断（共用一轮探测） ---------------- */
 
+/**
+ * v0.4.11 社区贡献 stub adapter 白名单：这两个 adapter 从未随包安装（binary 永远不可定位），
+ * 每天必报 error → 每天必推送，属噪音。判定依据为 id 白名单（adapters/*.json 中无结构化
+ * stub 标记，description 含「社区贡献 stub」但属展示文案）。未安装的 stub：探活与 binary
+ * 诊断检查降级为 warn，不再触发推送；已安装 adapter 的异常（installed=true）仍为 error。
+ */
+const STUB_ADAPTER_IDS = new Set(["claude-code", "codex"]);
+
 function adapterChecks(results: AdapterStatus[]): DoctorCheck[] {
   if (results.length === 0) {
     return [
@@ -91,19 +99,36 @@ function adapterChecks(results: AdapterStatus[]): DoctorCheck[] {
   const unhealthy = results.filter((r) => !r.healthy);
   const knownVersions = results.filter((r) => r.version != null && r.version.trim() !== "");
   const notInstalled = results.filter((r) => !r.installed);
+  // v0.4.11 未安装的社区 stub 不参与告警（降噪）；已安装 adapter 的异常仍按 error 处理
+  const isStubNoise = (r: AdapterStatus): boolean => !r.installed && STUB_ADAPTER_IDS.has(r.id);
+  const realUnhealthy = unhealthy.filter((r) => !isStubNoise(r));
+  const stubUnhealthy = unhealthy.filter(isStubNoise);
+  const realNotInstalled = notInstalled.filter((r) => !isStubNoise(r));
+  const stubNotInstalled = notInstalled.filter(isStubNoise);
+  const stubNote = "（未安装 stub，不参与告警）";
 
-  // 1) adapter 探活健康
+  // 1) adapter 探活健康（v0.4.11：仅剩未安装 stub 异常时降级 warn，不触发推送）
   const healthCheck: DoctorCheck = {
     name: "adapter 探活",
-    level: unhealthy.length === 0 ? "ok" : "error",
+    level:
+      realUnhealthy.length > 0 ? "error" : unhealthy.length > 0 ? "warn" : "ok",
     summary:
-      unhealthy.length === 0
-        ? `${healthy.length}/${results.length} 个 adapter 健康`
-        : `${healthy.length}/${results.length} 个 adapter 健康，异常: ${unhealthy.map((r) => r.id).join(", ")}`,
+      realUnhealthy.length > 0
+        ? `${healthy.length}/${results.length} 个 adapter 健康，异常: ${realUnhealthy
+            .map((r) => r.id)
+            .join(", ")}` +
+          (stubUnhealthy.length > 0
+            ? `；未安装 stub: ${stubUnhealthy.map((r) => r.id).join(", ")}${stubNote}`
+            : "")
+        : unhealthy.length > 0
+          ? `${healthy.length}/${results.length} 个 adapter 健康，异常: ${unhealthy
+              .map((r) => r.id)
+              .join(", ")}${stubNote}`
+          : `${healthy.length}/${results.length} 个 adapter 健康`,
     detail:
-      unhealthy.length === 0
+      realUnhealthy.length === 0
         ? undefined
-        : unhealthy
+        : realUnhealthy
             .map((r) => {
               const fix =
                 r.transport === "http"
@@ -141,6 +166,7 @@ function adapterChecks(results: AdapterStatus[]): DoctorCheck[] {
   }
 
   // 3) binary 诊断（PATH / 悬空符号链接线索，同 harness_list healthDetail）
+  // v0.4.11：仅剩未安装 stub 时降级 warn（其 binary 从未随包提供，error 属每日噪音）
   let binaryCheck: DoctorCheck;
   if (notInstalled.length === 0) {
     binaryCheck = {
@@ -148,12 +174,27 @@ function adapterChecks(results: AdapterStatus[]): DoctorCheck[] {
       level: "ok",
       summary: `全部 ${results.length} 个 adapter binary 可定位`,
     };
+  } else if (realNotInstalled.length === 0) {
+    binaryCheck = {
+      name: "binary 诊断",
+      level: "warn",
+      summary: `${stubNotInstalled.length} 个 binary 不可定位: ${stubNotInstalled
+        .map((r) => r.binary)
+        .join(", ")}${stubNote}`,
+      detail: stubNotInstalled
+        .map((r) => `${r.id}（${r.binary}）: ${diagnoseBinary(r.binary)}`)
+        .join("\n"),
+    };
   } else {
     binaryCheck = {
       name: "binary 诊断",
       level: "error",
-      summary: `${notInstalled.length} 个 binary 不可定位: ${notInstalled.map((r) => r.binary).join(", ")}`,
-      detail: notInstalled
+      summary:
+        `${realNotInstalled.length} 个 binary 不可定位: ${realNotInstalled.map((r) => r.binary).join(", ")}` +
+        (stubNotInstalled.length > 0
+          ? `；另 ${stubNotInstalled.length} 个未安装 stub 不定位${stubNote}`
+          : ""),
+      detail: realNotInstalled
         .map((r) => `${r.id}（${r.binary}）: ${diagnoseBinary(r.binary)}`)
         .join("\n"),
     };
